@@ -58,6 +58,11 @@ jobs:
           cp LUTCam/Models/RealESRGAN-weights.bin "$PKG/Data/com.apple.CoreML/weights/weight.bin"
           xcrun coremlc compile "$PKG" "$APP"
           ls -la "$APP/RealESRGAN.mlmodelc"
+          # Force the Files-app folder key: the generated Info.plist drops
+          # UIFileSharingEnabled even when the build setting is present.
+          /usr/libexec/PlistBuddy -c "Add :UIFileSharingEnabled bool true" "$APP/Info.plist" 2>/dev/null \
+            || /usr/libexec/PlistBuddy -c "Set :UIFileSharingEnabled true" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :UIFileSharingEnabled" "$APP/Info.plist"
 
       - name: Package IPA
         run: |
@@ -80,6 +85,6 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.3.0
-          name: LUT Cam v1.3.0
+          tag_name: v1.4.0
+          name: LUT Cam v1.4.0
           files: LUTCam-unsigned.ipa
