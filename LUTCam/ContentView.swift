@@ -1,5 +1,4 @@
 import AVFoundation
-import MetalKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -27,25 +26,32 @@ extension View {
     func glassPanel(radius: CGFloat = 24) -> some View { modifier(GlassPanel(radius: radius)) }
 }
 
-// MARK: - Live preview (Metal view drawn by the camera model, LUT graded)
+// MARK: - Live preview (system preview layer — the layer IS the view's backing
+// layer, so it always matches the view bounds; no manual frame sizing)
+
+private final class PreviewUIView: UIView {
+    override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
+    var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
+}
 
 struct LiveCameraView: UIViewRepresentable {
     @ObservedObject var model: CameraModel
 
-    func makeUIView(context: Context) -> MTKView {
-        let view = MTKView()
-        view.device = model.metalDevice
-        view.framebufferOnly = false
-        view.isPaused = true
-        view.enableSetNeedsDisplay = false
+    func makeUIView(context: Context) -> PreviewUIView {
+        let view = PreviewUIView()
         view.backgroundColor = .black
-        view.contentScaleFactor = UIScreen.main.scale
-        model.previewView = view
+        view.previewLayer.session = model.session
+        view.previewLayer.videoGravity = .resizeAspectFill
         return view
     }
 
-    func updateUIView(_ view: MTKView, context: Context) {
-        model.previewView = view
+    func updateUIView(_ view: PreviewUIView, context: Context) {
+        if view.previewLayer.session !== model.session {
+            view.previewLayer.session = model.session
+        }
+        if let connection = view.previewLayer.connection, connection.isVideoOrientationSupported {
+            connection.videoOrientation = .portrait
+        }
     }
 }
 

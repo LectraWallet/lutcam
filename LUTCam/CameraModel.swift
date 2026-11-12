@@ -1,8 +1,6 @@
 import AVFoundation
 import CoreImage
 import CoreVideo
-import Metal
-import MetalKit
 import Photos
 import UIKit
 
@@ -73,14 +71,6 @@ final class CameraModel: NSObject, ObservableObject {
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
     private var hasMicInput = false
 
-    // MARK: - Live preview (Metal)
-
-    /// The on-screen Metal view, set by the SwiftUI wrapper. Weak: the view owns itself.
-    weak var previewView: MTKView?
-    let metalDevice = MTLCreateSystemDefaultDevice()
-    private var metalContext: CIContext?
-    private var commandQueue: MTLCommandQueue?
-
     // MARK: - Live grading recipe (lock-guarded: written on main, read on captureQueue)
 
     private struct GradeRecipe {
@@ -93,6 +83,7 @@ final class CameraModel: NSObject, ObservableObject {
     // MARK: - Recording machinery (captureQueue-confined unless noted)
 
     private var isCapturing = false
+    private var recordingPending = false
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
     private var audioInput: AVAssetWriterInput?
@@ -101,16 +92,7 @@ final class CameraModel: NSObject, ObservableObject {
     private var recordingURL: URL?
     private var writerSessionStarted = false
     private var finishing = false
-    private var videoSize: CGSize = .zero
     private var recordTimer: Timer?
-
-    override init() {
-        super.init()
-        if let metalDevice {
-            metalContext = CIContext(mtlDevice: metalDevice)
-            commandQueue = metalDevice.makeCommandQueue()
-        }
-    }
 
     // MARK: - Setup
 
@@ -131,26 +113,13 @@ final class CameraModel: NSObject, ObservableObject {
         default:
             permissionDenied = true
         }
-        requestMicAccess()
+        // Mic access is requested lazily, only when recording starts — never at launch.
         loadSavedLUTs()
     }
 
     func openSettings() {
         if let url = URL(string: UIApplication.openSettingsURLString) {
             UIApplication.shared.open(url)
-        }
-    }
-
-    private func requestMicAccess() {
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized:
-            addMicInput()
-        case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-                if granted { self?.addMicInput() }
-            }
-        default:
-            break
         }
     }
 
@@ -193,17 +162,12 @@ final class CameraModel: NSObject, ObservableObject {
             }
             self.session.addOutput(self.photoOutput)
 
-            // Live video frames: graded + drawn by Metal, and written while recording.
+            // Video/audio data outputs are added lazily when recording starts,
+            // so the launch path is just camera + photo output (the v1.0 shape).
             self.videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
             self.videoOutput.alwaysDiscardsLateVideoFrames = true
             self.videoOutput.setSampleBufferDelegate(self, queue: self.captureQueue)
-            if self.session.canAddOutput(self.videoOutput) {
-                self.session.addOutput(self.videoOutput)
-            }
             self.audioOutput.setSampleBufferDelegate(self, queue: self.captureQueue)
-            if self.session.canAddOutput(self.audioOutput) {
-                self.session.addOutput(self.audioOutput)
-            }
 
             self.device = device
             self.session.commitConfiguration()
@@ -211,9 +175,6 @@ final class CameraModel: NSObject, ObservableObject {
             self.readRanges(from: device)
             self.observe(device: device)
             self.session.startRunning()
-            if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
-                self.addMicInput()
-            }
             DispatchQueue.main.async { self.isReady = true }
         }
     }
@@ -501,77 +462,156 @@ final class CameraModel: NSObject, ObservableObject {
 
     // MARK: - Video recording (LUT burned in, with audio when the mic is on)
 
-    func startRecording() {
-        captureQueue.async { [weak self] in
-            guard let self, !self.isCapturing, self.writer == nil, self.videoSize.width > 0 else { return }
-            let width = Int(self.videoSize.width)
-            let height = Int(self.videoSize.height)
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent(UUID().uuidString)
-                .appendingPathExtension("mov")
-            try? FileManager.default.removeItem(at: url)
-            guard let writer = try? AVAssetWriter(url: url, fileType: .mov) else { return }
-
-            let videoSettings: [String: Any] = [
-                AVVideoCodecKey: AVVideoCodecType.hevc,
-                AVVideoWidthKey: width,
-                AVVideoHeightKey: height,
-            ]
-            let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
-            vInput.expectsMediaDataInRealTime = true
-            guard writer.canAdd(vInput) else { return }
-            writer.add(vInput)
-
-            var aInput: AVAssetWriterInput?
-            if self.hasMicInput {
-                let audioSettings: [String: Any] = [
-                    AVFormatIDKey: kAudioFormatMPEG4AAC,
-                    AVSampleRateKey: 44100,
-                    AVNumberOfChannelsKey: 2,
-                    AVEncoderBitRateKey: 128000,
-                ]
-                let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-                input.expectsMediaDataInRealTime = true
-                if writer.canAdd(input) {
-                    writer.add(input)
-                    aInput = input
-                }
+    /// Mic access is requested here — only when the user actually records.
+    private func ensureMicAccess(_ done: @escaping () -> Void) {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            addMicInput()
+            done()
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+                if granted { self?.addMicInput() }
+                done()
             }
+        default:
+            done()
+        }
+    }
 
-            let poolAttrs: [String: Any] = [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-                kCVPixelBufferWidthKey as String: width,
-                kCVPixelBufferHeightKey as String: height,
-                kCVPixelBufferIOSurfacePropertiesKey as String: [:],
-            ]
-            var pool: CVPixelBufferPool?
-            guard CVPixelBufferPoolCreate(nil, nil, poolAttrs as CFDictionary, &pool) == kCVReturnSuccess,
-                  let pool else { return }
-
-            self.writer = writer
-            self.videoInput = vInput
-            self.audioInput = aInput
-            self.adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: vInput, sourcePixelBufferAttributes: nil)
-            self.pixelPool = pool
-            self.recordingURL = url
-            self.writerSessionStarted = false
-            self.finishing = false
-            writer.startWriting()
-            self.isCapturing = true
-            DispatchQueue.main.async {
-                self.isRecording = true
-                self.recordingSeconds = 0
-                self.recordTimer?.invalidate()
-                self.recordTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-                    self?.recordingSeconds += 1
+    func startRecording() {
+        ensureMicAccess { [weak self] in
+            guard let self else { return }
+            self.sessionQueue.async { [weak self] in
+                guard let self else { return }
+                self.session.beginConfiguration()
+                if self.session.canAddOutput(self.videoOutput) {
+                    self.session.addOutput(self.videoOutput)
+                }
+                if self.session.canAddOutput(self.audioOutput) {
+                    self.session.addOutput(self.audioOutput)
+                }
+                self.session.commitConfiguration()
+                self.captureQueue.async { [weak self] in
+                    guard let self, !self.isCapturing else { return }
+                    self.recordingPending = true
+                    self.isCapturing = true
+                    DispatchQueue.main.async {
+                        self.isRecording = true
+                        self.recordingSeconds = 0
+                        self.recordTimer?.invalidate()
+                        self.recordTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                            self?.recordingSeconds += 1
+                        }
+                    }
                 }
             }
         }
     }
 
+    /// Called on captureQueue from the first video frame after recording starts.
+    private func beginWriter(size: CGSize) {
+        guard writer == nil, size.width > 0, size.height > 0 else { return }
+        let width = Int(size.width)
+        let height = Int(size.height)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("mov")
+        try? FileManager.default.removeItem(at: url)
+        guard let writer = try? AVAssetWriter(url: url, fileType: .mov) else {
+            cancelRecording()
+            return
+        }
+
+        let videoSettings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.hevc,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height,
+        ]
+        let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        vInput.expectsMediaDataInRealTime = true
+        guard writer.canAdd(vInput) else {
+            cancelRecording()
+            return
+        }
+        writer.add(vInput)
+
+        var aInput: AVAssetWriterInput?
+        if hasMicInput {
+            let audioSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 44100,
+                AVNumberOfChannelsKey: 2,
+                AVEncoderBitRateKey: 128000,
+            ]
+            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+            input.expectsMediaDataInRealTime = true
+            if writer.canAdd(input) {
+                writer.add(input)
+                aInput = input
+            }
+        }
+
+        let poolAttrs: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: width,
+            kCVPixelBufferHeightKey as String: height,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+        ]
+        var pool: CVPixelBufferPool?
+        guard CVPixelBufferPoolCreate(nil, nil, poolAttrs as CFDictionary, &pool) == kCVReturnSuccess,
+              let pool else {
+            cancelRecording()
+            return
+        }
+
+        self.writer = writer
+        self.videoInput = vInput
+        self.audioInput = aInput
+        self.adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: vInput, sourcePixelBufferAttributes: nil)
+        self.pixelPool = pool
+        self.recordingURL = url
+        self.writerSessionStarted = false
+        self.finishing = false
+        writer.startWriting()
+    }
+
+    /// Writer setup failed: reset recording state and drop the data outputs.
+    private func cancelRecording() {
+        recordingPending = false
+        isCapturing = false
+        DispatchQueue.main.async {
+            self.isRecording = false
+            self.recordTimer?.invalidate()
+            self.recordTimer = nil
+        }
+        removeDataOutputs()
+    }
+
+    private func removeDataOutputs() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.session.beginConfiguration()
+            self.session.removeOutput(self.videoOutput)
+            self.session.removeOutput(self.audioOutput)
+            self.session.commitConfiguration()
+        }
+    }
+
     func stopRecording() {
         captureQueue.async { [weak self] in
-            guard let self, self.isCapturing, let writer = self.writer else { return }
+            guard let self, self.isCapturing else { return }
+            self.recordingPending = false
+            guard let writer = self.writer else {
+                // No frames arrived before stop — just reset.
+                self.isCapturing = false
+                DispatchQueue.main.async {
+                    self.isRecording = false
+                    self.recordTimer?.invalidate()
+                    self.recordTimer = nil
+                }
+                self.removeDataOutputs()
+                return
+            }
             self.finishing = true
             self.videoInput?.markAsFinished()
             self.audioInput?.markAsFinished()
@@ -593,6 +633,7 @@ final class CameraModel: NSObject, ObservableObject {
                     self.recordTimer?.invalidate()
                     self.recordTimer = nil
                 }
+                self.removeDataOutputs()
                 if success, let url {
                     self.saveVideo(at: url)
                 } else if let url {
@@ -684,7 +725,7 @@ final class CameraModel: NSObject, ObservableObject {
     }
 }
 
-// MARK: - Live frames: grade, draw to Metal, write while recording
+// MARK: - Recording frames: grade + write (only while recording)
 
 extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
 
@@ -698,6 +739,7 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAu
         }
         guard output === videoOutput,
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard isCapturing, !finishing else { return }
 
         // Sensor frames arrive landscape; rotate to portrait upright for the back camera.
         var image = CIImage(cvPixelBuffer: pixelBuffer).oriented(.right)
@@ -705,45 +747,18 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAu
         if let lut = recipe.lut {
             image = CubeLUT.grade(image, lut: lut, strength: recipe.strength)
         }
-        let extent = image.extent
-        if videoSize != extent.size { videoSize = extent.size }
-
-        renderPreview(image)
-
-        if isCapturing, !finishing {
+        if recordingPending {
+            recordingPending = false
+            beginWriter(size: image.extent.size)
+        }
+        if writer != nil {
             appendVideoFrame(image, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
         }
     }
 
-    private func renderPreview(_ image: CIImage) {
-        guard let metalContext, let commandQueue,
-              let view = previewView,
-              let drawable = view.currentDrawable,
-              let commandBuffer = commandQueue.makeCommandBuffer() else { return }
-        let drawableSize = view.drawableSize
-        guard drawableSize.width > 0, drawableSize.height > 0 else { return }
-
-        // Aspect-fill: center-crop the frame to the drawable's aspect.
-        let extent = image.extent
-        let imageAspect = extent.width / extent.height
-        let viewAspect = drawableSize.width / drawableSize.height
-        var crop = extent
-        if imageAspect > viewAspect {
-            let w = extent.height * viewAspect
-            crop = CGRect(x: extent.midX - w / 2, y: extent.minY, width: w, height: extent.height)
-        } else {
-            let h = extent.width / viewAspect
-            crop = CGRect(x: extent.minX, y: extent.midY - h / 2, width: extent.width, height: h)
-        }
-        metalContext.render(image, to: drawable.texture, commandBuffer: commandBuffer, bounds: crop, colorSpace: CGColorSpaceCreateDeviceRGB())
-        commandBuffer.present(drawable)
-        commandBuffer.commit()
-    }
-
     private func appendVideoFrame(_ image: CIImage, pts: CMTime) {
         guard let writer, writer.status == .writing,
-              let vInput = videoInput, let adaptor, let pool = pixelPool,
-              let metalContext else { return }
+              let vInput = videoInput, let adaptor, let pool = pixelPool else { return }
         if !writerSessionStarted {
             writer.startSession(atSourceTime: pts)
             writerSessionStarted = true
@@ -751,7 +766,7 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAu
         guard vInput.isReadyForMoreMediaData else { return }
         var px: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &px) == kCVReturnSuccess, let px else { return }
-        metalContext.render(image, to: px)
+        ciContext.render(image, to: px)
         adaptor.append(px, withPresentationTime: pts)
     }
 }
