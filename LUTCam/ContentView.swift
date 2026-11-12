@@ -278,12 +278,12 @@ struct ContentView: View {
 
     private var lutStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
+            LazyHStack(spacing: 8) {
                 lutChip(title: "None", selected: model.selectedLUT == nil) {
                     model.selectLUT(nil)
                 }
                 ForEach(model.luts) { lut in
-                    lutChip(title: lut.name, selected: model.selectedLUT?.id == lut.id) {
+                    lutChip(title: lut.name, selected: model.selectedLUT?.name == lut.name) {
                         model.selectLUT(lut)
                     }
                 }
@@ -319,45 +319,54 @@ struct ContentView: View {
 
     private var controlDeck: some View {
         VStack(spacing: 14) {
-            // Tracking + axis lock + shake stabilization
-            HStack(spacing: 8) {
-                Button { model.toggleTracking() } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: model.faceTracking ? "viewfinder.circle.fill" : "viewfinder.circle")
-                        Text("Track")
-                    }
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(model.faceTracking ? .black : .white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background(model.faceTracking ? .white : .clear, in: Capsule())
-                    .overlay(Capsule().stroke(.white.opacity(0.4), lineWidth: 1))
-                }
-                Button { model.toggleStabilization() } label: {
-                    Text("Stab")
+            // Tracking + shake stabilization on one row; axis pills on their
+            // own row when tracking is on, so nothing ever squeezes or wraps.
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    Button { model.toggleTracking() } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: model.faceTracking ? "viewfinder.circle.fill" : "viewfinder.circle")
+                            Text("Track")
+                        }
                         .font(.footnote.weight(.semibold))
-                        .foregroundStyle(model.stabilizationEnabled ? .black : .white)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .foregroundStyle(model.faceTracking ? .black : .white)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 7)
-                        .background(model.stabilizationEnabled ? .white : .clear, in: Capsule())
+                        .background(model.faceTracking ? .white : .clear, in: Capsule())
                         .overlay(Capsule().stroke(.white.opacity(0.4), lineWidth: 1))
+                    }
+                    Button { model.toggleStabilization() } label: {
+                        Text("Stab")
+                            .font(.footnote.weight(.semibold))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .foregroundStyle(model.stabilizationEnabled ? .black : .white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(model.stabilizationEnabled ? .white : .clear, in: Capsule())
+                            .overlay(Capsule().stroke(.white.opacity(0.4), lineWidth: 1))
+                    }
+                    Spacer()
                 }
                 if model.faceTracking {
-                    ForEach(TrackAxis.allCases, id: \.self) { axis in
-                        Button { model.trackAxis = axis } label: {
-                            Text(axis.rawValue)
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(model.trackAxis == axis ? .black : .white)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 7)
-                                .background(model.trackAxis == axis ? .white : .clear, in: Capsule())
+                    HStack(spacing: 8) {
+                        ForEach(TrackAxis.allCases, id: \.self) { axis in
+                            Button { model.setTrackAxis(axis) } label: {
+                                Text(axis.rawValue)
+                                    .font(.footnote.weight(.semibold))
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    .foregroundStyle(model.trackAxis == axis ? .black : .white)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 7)
+                                    .background(model.trackAxis == axis ? .white : .clear, in: Capsule())
+                            }
                         }
+                        Spacer()
                     }
-                    Text("face focus")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
-                Spacer()
             }
 
             // Tabs
@@ -633,7 +642,7 @@ struct ContentView: View {
                             HStack {
                                 Text(lut.name).foregroundStyle(.white)
                                 Spacer()
-                                if model.selectedLUT?.id == lut.id {
+                                if model.selectedLUT?.name == lut.name {
                                     Image(systemName: "checkmark").foregroundStyle(.white)
                                 }
                             }
