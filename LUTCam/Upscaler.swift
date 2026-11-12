@@ -255,6 +255,10 @@ final class Upscaler {
 /// (MLFeatureProvider is a class-only protocol, so this must be a class.)
 private final class SingleInputProvider: NSObject, MLFeatureProvider {
     let input: MLMultiArray
+    init(input: MLMultiArray) {
+        self.input = input
+        super.init()
+    }
     var featureNames: Set<String> { ["input"] }
     func featureValue(for featureName: String) -> MLFeatureValue? {
         featureName == "input" ? MLFeatureValue(multiArray: input) : nil
