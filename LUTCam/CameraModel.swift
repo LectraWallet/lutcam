@@ -61,8 +61,9 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var digitalZoomFactor: CGFloat = 1
     @Published var zoomCap: CGFloat = 1000
 
-    // LUTs
-    @Published var luts: [LoadedLUT] = []
+    // LUTs. `luts` is just file entries (names + URLs) — the .cube data is
+    // parsed only when a LUT is selected, so 200+ files never block launch.
+    @Published var luts: [LUTEntry] = []
     @Published var selectedLUT: LoadedLUT?
     @Published var lutStrength: Float = 0.7
     @Published var lutError: String?
@@ -106,6 +107,11 @@ final class CameraModel: NSObject, ObservableObject {
     private var stabDX: Double = 0
     private var stabDY: Double = 0
     private var stabRot: Double = 0
+    private let lutQueue = DispatchQueue(label: "lutcam.luts", qos: .utility)
+    private var selectToken = UUID()
+    private var faceAnchor: CGRect?
+    private var pointAnchor: CGRect?
+    private var trackMisses = 0
     private var device: AVCaptureDevice?
     private var activeDelegates: [PhotoCaptureDelegate] = []
     private var observations: [NSKeyValueObservation] = []
@@ -447,8 +453,33 @@ final class CameraModel: NSObject, ObservableObject {
 
     // MARK: - LUT selection
 
-    func selectLUT(_ lut: LoadedLUT?) {
-        selectedLUT = lut
+    /// Select a LUT entry. The .cube file is parsed off the main thread
+    /// (a 33^3 cube is ~36k lines) and applied when ready.
+    func selectLUT(_ entry: LUTEntry?) {
+        guard let entry else {
+            selectToken = UUID()
+            selectedLUT = nil
+            lutError = nil
+            return
+        }
+        let token = UUID()
+        selectToken = token
+        lutQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                let lut = try CubeLUT.parse(url: entry.url, name: entry.name)
+                DispatchQueue.main.async {
+                    guard self.selectToken == token else { return }
+                    self.selectedLUT = lut
+                    self.lutError = nil
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard self.selectToken == token else { return }
+                    self.lutError = "That .cube file could not be read. It may be damaged."
+                }
+            }
+        }
     }
 
     func setLUTStrength(_ strength: Float) {
@@ -607,6 +638,37 @@ final class CameraModel: NSObject, ObservableObject {
 
     // MARK: - Face tracking
 
+    /// Change the tracking axis. Anchors reset so H/V/Lock re-anchor on the
+    /// next frame instead of holding a stale position.
+    func setTrackAxis(_ axis: TrackAxis) {
+        trackAxis = axis
+        faceAnchor = nil
+        pointAnchor = nil
+    }
+
+    /// Constrains a tracking box to the current axis mode around its anchor:
+    /// H slides only sideways, V only up/down, Lock freezes the box entirely.
+    /// In All mode the anchor follows the box.
+    private func constrained(_ rect: CGRect, anchor: inout CGRect?) -> CGRect {
+        switch trackAxis {
+        case .all:
+            anchor = rect
+            return rect
+        case .horizontal:
+            let a = anchor ?? rect
+            anchor = a
+            return CGRect(x: rect.minX, y: a.minY, width: rect.width, height: a.height)
+        case .vertical:
+            let a = anchor ?? rect
+            anchor = a
+            return CGRect(x: a.minX, y: rect.minY, width: a.width, height: rect.height)
+        case .locked:
+            let a = anchor ?? rect
+            anchor = a
+            return a
+        }
+    }
+
     private func trackFace(_ layerRect: CGRect) {
         // A selected point wins: when point tracking is active, faces are ignored.
         guard trackRequest == nil else { return }
@@ -659,10 +721,12 @@ final class CameraModel: NSObject, ObservableObject {
             guard let self else { return }
             let observation = VNDetectedObjectObservation(boundingBox: visionBox)
             let request = VNTrackObjectRequest(detectedObjectObservation: observation)
-            request.trackingLevel = .fast
+            request.trackingLevel = .accurate
             self.trackRequest = request
             self.trackFrameCounter = 0
+            self.trackMisses = 0
             self.lastTrackRect = nil
+            self.pointAnchor = viewBox
         }
         DispatchQueue.main.async { [weak self] in self?.trackRect = viewBox }
     }
@@ -702,13 +766,18 @@ final class CameraModel: NSObject, ObservableObject {
             guard let self, let motion else { return }
             let dt = 1.0 / 30.0
             let focal: Double = 350 // points of shift per radian of rotation
+            // Dead zone kills sensor noise; the decay still settles the offset.
+            let ry = abs(motion.rotationRate.y) < 0.02 ? 0 : motion.rotationRate.y
+            let rx = abs(motion.rotationRate.x) < 0.02 ? 0 : motion.rotationRate.x
+            let rz = abs(motion.rotationRate.z) < 0.02 ? 0 : motion.rotationRate.z
             // Integrate rotation rates with decay: shakes cancel, slow pans recenter.
-            // Signs derived from the device axes (x right, y up, z toward user):
-            // positive yaw/pitch/roll move scene content left/up/counterclockwise,
-            // so the preview shifts right/down/clockwise to compensate.
-            self.stabDX = (self.stabDX + motion.rotationRate.y * dt * focal) * 0.88
-            self.stabDY = (self.stabDY + motion.rotationRate.x * dt * focal) * 0.88
-            self.stabRot = (self.stabRot + motion.rotationRate.z * dt) * 0.88
+            // Signs: panning right is NEGATIVE yaw and slides content LEFT, so the
+            // preview shifts RIGHT (+x) — the offset opposes the rotation rate.
+            // Same opposition for pitch (content slides down, preview shifts up)
+            // and roll (content twists counterclockwise, preview twists clockwise).
+            self.stabDX = (self.stabDX - ry * dt * focal) * 0.88
+            self.stabDY = (self.stabDY - rx * dt * focal) * 0.88
+            self.stabRot = (self.stabRot - rz * dt) * 0.88
             let dx = min(max(self.stabDX, -50), 50)
             let dy = min(max(self.stabDY, -50), 50)
             let rot = min(max(self.stabRot, -0.06), 0.06)
@@ -737,33 +806,34 @@ final class CameraModel: NSObject, ObservableObject {
         return folder
     }
 
-    /// Scans the Files-app-visible Documents folder: the LUTs/ subfolder first,
-    /// then .cube files dropped at the Documents root. Deduplicated by name.
+    /// Scans the Files-app-visible Documents folder recursively: the LUTs/
+    /// subfolder and the Documents root, including nested folders. Only file
+    /// names/URLs are collected here — parsing happens on selection, so the
+    /// scan is fast even with hundreds of files. Runs off the main thread.
     /// Called at launch and when the app returns to the foreground, so files
     /// added in the Files app show up without an in-app import.
     func loadSavedLUTs() {
-        var urls: [URL] = []
-        var seen = Set<String>()
-        let fm = FileManager.default
-        for dir in [lutsFolder, documentsDir].compactMap({ $0 }) {
-            guard let files = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { continue }
-            for file in files where file.pathExtension.lowercased() == "cube" {
-                let name = file.deletingPathExtension().lastPathComponent
-                if seen.insert(name).inserted { urls.append(file) }
+        lutQueue.async { [weak self] in
+            guard let self else { return }
+            var entries: [LUTEntry] = []
+            var seen = Set<String>()
+            let fm = FileManager.default
+            for dir in [self.lutsFolder, self.documentsDir].compactMap({ $0 }) {
+                guard let enumerator = fm.enumerator(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { continue }
+                for case let url as URL in enumerator {
+                    guard url.pathExtension.lowercased() == "cube" else { continue }
+                    let name = url.deletingPathExtension().lastPathComponent
+                    guard seen.insert(name.lowercased()).inserted else { continue }
+                    entries.append(LUTEntry(name: name, url: url))
+                }
             }
-        }
-        var loaded: [LoadedLUT] = []
-        for file in urls {
-            if let lut = try? CubeLUT.parse(url: file, name: file.deletingPathExtension().lastPathComponent) {
-                loaded.append(lut)
-            }
-        }
-        loaded.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        let selectedName = selectedLUT?.name
-        DispatchQueue.main.async {
-            self.luts = loaded
-            if let selectedName, !loaded.contains(where: { $0.name == selectedName }) {
-                self.selectedLUT = nil
+            entries.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            let selectedName = self.selectedLUT?.name
+            DispatchQueue.main.async {
+                self.luts = entries
+                if let selectedName, !entries.contains(where: { $0.name == selectedName }) {
+                    self.selectedLUT = nil
+                }
             }
         }
     }
@@ -787,32 +857,14 @@ final class CameraModel: NSObject, ObservableObject {
             lutError = "Could not copy that LUT file."
             return
         }
-        do {
-            let lut = try CubeLUT.parse(url: dest, name: dest.deletingPathExtension().lastPathComponent)
-            DispatchQueue.main.async {
-                self.luts.removeAll { $0.name == lut.name }
-                self.luts.append(lut)
-                self.luts.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-                self.selectLUT(lut)
-                self.lutError = nil
-            }
-        } catch {
-            try? FileManager.default.removeItem(at: dest)
-            lutError = "That .cube file could not be read. It may be damaged."
-        }
+        loadSavedLUTs()
+        selectLUT(LUTEntry(name: dest.deletingPathExtension().lastPathComponent, url: dest))
     }
 
-    func deleteLUT(_ lut: LoadedLUT) {
-        if let fileName = lut.fileName {
-            if let folder = lutsFolder {
-                try? FileManager.default.removeItem(at: folder.appendingPathComponent(fileName))
-            }
-            if let docs = documentsDir {
-                try? FileManager.default.removeItem(at: docs.appendingPathComponent(fileName))
-            }
-        }
-        luts.removeAll { $0.id == lut.id }
-        if selectedLUT?.id == lut.id { selectLUT(nil) }
+    func deleteLUT(_ entry: LUTEntry) {
+        try? FileManager.default.removeItem(at: entry.url)
+        luts.removeAll { $0.id == entry.id }
+        if selectedLUT?.name == entry.name { selectLUT(nil) }
     }
 }
 
@@ -849,16 +901,17 @@ extension CameraModel: AVCaptureMetadataOutputObjectsDelegate {
             height: bounds.height / max(layer.bounds.height, 1)
         )
         let now = Date()
+        let display = constrained(normalized, anchor: &faceAnchor)
         let rectChanged: Bool
         if let last = lastFaceRect {
-            rectChanged = abs(last.midX - normalized.midX) + abs(last.midY - normalized.midY) > 0.01
+            rectChanged = abs(last.midX - display.midX) + abs(last.midY - display.midY) > 0.01
         } else {
             rectChanged = true
         }
         if rectChanged || now.timeIntervalSince(lastFacePublish) > 0.5 {
-            lastFaceRect = normalized
+            lastFaceRect = display
             lastFacePublish = now
-            DispatchQueue.main.async { [weak self] in self?.faceRect = normalized }
+            DispatchQueue.main.async { [weak self] in self?.faceRect = display }
         }
         trackFace(normalized)
     }
@@ -881,13 +934,19 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
             return
         }
         guard let result = request.results?.first as? VNDetectedObjectObservation else {
-            // Tracking lost — clear so the user can re-tap the point.
-            trackRequest = nil
-            DispatchQueue.main.async { [weak self] in self?.trackRect = nil }
+            // Brief misses (blink/occlusion) don't drop the track — it takes
+            // 3 empty frames in a row before the box clears for a re-tap.
+            trackMisses += 1
+            if trackMisses >= 3 {
+                trackRequest = nil
+                DispatchQueue.main.async { [weak self] in self?.trackRect = nil }
+            }
             return
         }
+        trackMisses = 0
         let box = result.boundingBox
-        let viewRect = CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
+        let rawRect = CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
+        let viewRect = constrained(rawRect, anchor: &pointAnchor)
         let now = Date()
         let changed: Bool
         if let last = lastTrackRect {
