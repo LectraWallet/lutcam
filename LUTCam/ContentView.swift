@@ -278,7 +278,7 @@ struct ContentView: View {
 
     private var lutStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            LazyHStack(spacing: 8) {
+            HStack(spacing: 8) {
                 lutChip(title: "None", selected: model.selectedLUT == nil) {
                     model.selectLUT(nil)
                 }
