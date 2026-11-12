@@ -1,10 +1,10 @@
 import CoreML
 import UIKit
 
-enum UpscaleError: LocalizedError {
+enum UpscaleError: LocalizedError, Equatable {
     case modelMissing
-    case compileFailed
-    case loadFailed
+    case compileFailed(String)
+    case loadFailed(String)
     case predictionFailed
     case imageFailed
     case cancelled
@@ -12,8 +12,8 @@ enum UpscaleError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .modelMissing: return "The AI model is missing from the app."
-        case .compileFailed: return "The AI model could not be prepared on this phone."
-        case .loadFailed: return "The AI model could not be loaded."
+        case .compileFailed(let detail): return "The AI model could not be prepared on this phone. (\(detail))"
+        case .loadFailed(let detail): return "The AI model could not be loaded. (\(detail))"
         case .predictionFailed: return "Upscaling failed on this photo."
         case .imageFailed: return "That photo could not be read."
         case .cancelled: return "Upscaling was cancelled."
@@ -41,8 +41,11 @@ final class Upscaler {
 
     private init() {}
 
-    // MARK: - Model loading (first use compiles the .mlpackage on-device)
+    // MARK: - Model loading
 
+    /// Prefers the .mlmodelc compiled at build time (bundled in the app).
+    /// Falls back to compiling the .mlpackage on-device from the flat bundle
+    /// resources if the build-time compile didn't land in the bundle.
     private func loadModel() throws -> MLModel {
         lock.lock()
         defer { lock.unlock() }
@@ -52,7 +55,9 @@ final class Upscaler {
         let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let compiledDir = support.appendingPathComponent("RealESRGAN.mlmodelc", isDirectory: true)
         let compiledURL: URL
-        if fm.fileExists(atPath: compiledDir.path) {
+        if let bundled = Bundle.main.url(forResource: "RealESRGAN", withExtension: "mlmodelc") {
+            compiledURL = bundled
+        } else if fm.fileExists(atPath: compiledDir.path) {
             compiledURL = compiledDir
         } else {
             // Rebuild the .mlpackage from the flat bundle resources, then compile it.
@@ -77,7 +82,8 @@ final class Upscaler {
                 compiledURL = compiledDir
             } catch {
                 try? fm.removeItem(at: package)
-                throw (error as? UpscaleError) ?? UpscaleError.compileFailed
+                if let upscaleError = error as? UpscaleError { throw upscaleError }
+                throw UpscaleError.compileFailed((error as NSError).localizedDescription)
             }
             try? fm.removeItem(at: package)
         }
@@ -89,9 +95,11 @@ final class Upscaler {
             model = loaded
             return loaded
         } catch {
-            // A stale or broken compiled model: delete it so the next run recompiles.
-            try? fm.removeItem(at: compiledDir)
-            throw UpscaleError.loadFailed
+            // A stale or broken on-device compiled model: delete it so the next run recompiles.
+            if compiledURL == compiledDir {
+                try? fm.removeItem(at: compiledDir)
+            }
+            throw UpscaleError.loadFailed((error as NSError).localizedDescription)
         }
     }
 

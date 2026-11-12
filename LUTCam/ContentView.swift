@@ -42,6 +42,7 @@ struct LiveCameraView: UIViewRepresentable {
         view.backgroundColor = .black
         view.previewLayer.session = model.session
         view.previewLayer.videoGravity = .resizeAspectFill
+        model.previewLayer = view.previewLayer
         return view
     }
 
@@ -49,8 +50,14 @@ struct LiveCameraView: UIViewRepresentable {
         if view.previewLayer.session !== model.session {
             view.previewLayer.session = model.session
         }
-        if let connection = view.previewLayer.connection, connection.isVideoOrientationSupported {
-            connection.videoOrientation = .portrait
+        model.previewLayer = view.previewLayer
+        if let connection = view.previewLayer.connection {
+            if connection.isVideoOrientationSupported {
+                connection.videoOrientation = .portrait
+            }
+            if connection.isVideoStabilizationSupported {
+                connection.preferredVideoStabilizationMode = .auto
+            }
         }
     }
 }
@@ -79,6 +86,7 @@ struct ContentView: View {
     @State private var focusPoint: CGPoint?
     @State private var showFocusRing = false
     @State private var pinchBase: CGFloat?
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ZStack {
@@ -93,6 +101,9 @@ struct ContentView: View {
             }
         }
         .onAppear { model.start() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { model.loadSavedLUTs() }
+        }
         .sheet(isPresented: $showLUTs) { lutSheet }
         .alert("LUT problem", isPresented: Binding(
             get: { model.lutError != nil },
@@ -135,25 +146,36 @@ struct ContentView: View {
     private var cameraView: some View {
         GeometryReader { geo in
             ZStack {
-                LiveCameraView(model: model)
-                    .ignoresSafeArea()
-                    .onTapGesture { location in
-                        let point = CGPoint(x: location.x / geo.size.width, y: location.y / geo.size.height)
-                        model.focusAt(point: point)
-                        focusPoint = location
-                        withAnimation(.easeOut(duration: 0.15)) { showFocusRing = true }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
-                            withAnimation { showFocusRing = false }
-                        }
+                // Preview + face box scale together for digital zoom (past the lens max).
+                ZStack {
+                    LiveCameraView(model: model)
+                        .ignoresSafeArea()
+
+                    if model.faceTracking, let rect = model.faceRect {
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.green, lineWidth: 2)
+                            .frame(width: rect.width * geo.size.width, height: rect.height * geo.size.height)
+                            .position(x: rect.midX * geo.size.width, y: rect.midY * geo.size.height)
                     }
-                    .simultaneousGesture(
-                        MagnificationGesture()
-                            .onChanged { value in
-                                if pinchBase == nil { pinchBase = model.zoomFactor }
-                                model.setZoom((pinchBase ?? 1) * value)
-                            }
-                            .onEnded { _ in pinchBase = nil }
-                    )
+                }
+                .scaleEffect(model.digitalZoomFactor)
+                .onTapGesture { location in
+                    let point = CGPoint(x: location.x / geo.size.width, y: location.y / geo.size.height)
+                    model.focusAt(point: point)
+                    focusPoint = location
+                    withAnimation(.easeOut(duration: 0.15)) { showFocusRing = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                        withAnimation { showFocusRing = false }
+                    }
+                }
+                .simultaneousGesture(
+                    MagnificationGesture()
+                        .onChanged { value in
+                            if pinchBase == nil { pinchBase = model.zoomFactor }
+                            model.setZoom((pinchBase ?? 1) * value)
+                        }
+                        .onEnded { _ in pinchBase = nil }
+                )
 
                 if showFocusRing, let p = focusPoint {
                     RoundedRectangle(cornerRadius: 6)
@@ -277,6 +299,38 @@ struct ContentView: View {
 
     private var controlDeck: some View {
         VStack(spacing: 14) {
+            // Face tracking + axis lock
+            HStack(spacing: 8) {
+                Button { model.faceTracking.toggle() } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: model.faceTracking ? "viewfinder.circle.fill" : "viewfinder.circle")
+                        Text("Track")
+                    }
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(model.faceTracking ? .black : .white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(model.faceTracking ? .white : .clear, in: Capsule())
+                    .overlay(Capsule().stroke(.white.opacity(0.4), lineWidth: 1))
+                }
+                if model.faceTracking {
+                    ForEach(TrackAxis.allCases, id: \.self) { axis in
+                        Button { model.trackAxis = axis } label: {
+                            Text(axis.rawValue)
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(model.trackAxis == axis ? .black : .white)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .background(model.trackAxis == axis ? .white : .clear, in: Capsule())
+                        }
+                    }
+                    Text("face focus")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
             // Tabs
             HStack(spacing: 4) {
                 ForEach(ControlTab.allCases, id: \.self) { t in
@@ -331,7 +385,13 @@ struct ContentView: View {
     }
 
     private func modeButton(_ m: CaptureMode, _ title: String) -> some View {
-        Button { mode = m } label: {
+        Button {
+            mode = m
+            // Video caps at the lens max (the file recorder can't do digital zoom);
+            // photos go all the way to 1000×.
+            model.zoomCap = (m == .video) ? model.deviceMaxZoom : model.maxZoom
+            if model.zoomFactor > model.zoomCap { model.setZoom(model.zoomCap) }
+        } label: {
             Text(title)
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(mode == m ? .black : .white)
@@ -373,6 +433,7 @@ struct ContentView: View {
         model.setWBAuto(true)
         model.setFocusAuto(true)
         model.setExposureBias(0)
+        model.setZoom(1)
     }
 
     @ViewBuilder
@@ -467,7 +528,7 @@ struct ContentView: View {
                     set: { model.setZoom(zoomFromLog($0)) }
                 ), in: 0...1)
             }
-            Text("Pinch the screen to zoom too. Past about 10× it gets blurry — that's digital zoom, not the lens.")
+            Text("To 1000×. Past the lens max it's digital and gets blurry — tap Upscale 4× on the photo after to clean it up. Video caps at the lens max.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -515,6 +576,12 @@ struct ContentView: View {
     private var lutSheet: some View {
         NavigationStack {
             List {
+                Section {
+                    Text("Easiest way: put .cube files in the Files app — On My iPhone → LUTCam → LUTs. They show up here when you come back to the app. Files dropped right in the LUTCam folder work too.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .listRowBackground(Color(white: 0.12))
+                }
                 Section {
                     Button {
                         model.selectLUT(nil)
