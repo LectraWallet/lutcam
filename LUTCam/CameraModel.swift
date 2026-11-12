@@ -476,7 +476,8 @@ final class CameraModel: NSObject, ObservableObject {
             } catch {
                 DispatchQueue.main.async {
                     guard self.selectToken == token else { return }
-                    self.lutError = "That .cube file could not be read. It may be damaged."
+                    let reason = (error as? CubeError)?.reason ?? "unknown format"
+                    self.lutError = "That .cube file could not be read (\(reason))."
                 }
             }
         }
