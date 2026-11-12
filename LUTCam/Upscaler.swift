@@ -252,7 +252,8 @@ final class Upscaler {
 }
 
 /// Minimal feature provider: the model has exactly one input, "input".
-private struct SingleInputProvider: MLFeatureProvider {
+/// (MLFeatureProvider is a class-only protocol, so this must be a class.)
+private final class SingleInputProvider: NSObject, MLFeatureProvider {
     let input: MLMultiArray
     var featureNames: Set<String> { ["input"] }
     func featureValue(for featureName: String) -> MLFeatureValue? {
