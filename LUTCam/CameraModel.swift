@@ -504,8 +504,9 @@ final class CameraModel: NSObject, ObservableObject {
                 guard let self, !self.isRecording else { return }
                 if let connection = self.movieOutput.connection(with: .video) {
                     if connection.isVideoStabilizationSupported {
-                        // cinematicExtended is the strongest stabilization; fall back to auto.
-                        if #available(iOS 18.0, *), connection.isVideoStabilizationModeSupported(.cinematicExtended) {
+                        // No API queries per-mode support: set the strongest
+                        // mode and the system falls back to the closest one.
+                        if #available(iOS 18.0, *) {
                             connection.preferredVideoStabilizationMode = .cinematicExtended
                         } else {
                             connection.preferredVideoStabilizationMode = .auto
