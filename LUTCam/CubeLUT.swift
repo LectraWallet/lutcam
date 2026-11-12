@@ -26,14 +26,14 @@ struct LoadedLUT: Identifiable, Equatable {
 enum CubeError: Error {
     case unreadable
     case noSize
-    case badSize
+    case badSize(Int)
     case notEnoughData
 
     var reason: String {
         switch self {
         case .unreadable: return "the file could not be read as text"
         case .noSize: return "no LUT_3D_SIZE or LUT_1D_SIZE line found"
-        case .badSize: return "unsupported LUT size"
+        case .badSize(let n): return "unsupported LUT size (\(n))"
         case .notEnoughData: return "not enough color data for the stated size"
         }
     }
@@ -41,10 +41,13 @@ enum CubeError: Error {
 
 struct CubeLUT {
 
-    /// Parse an Adobe .cube file. Supports LUT_3D_SIZE 2...64 and 1D LUTs
-    /// (expanded into a 3D cube). Tolerant of BOMs, tabs, CRLF, non-UTF8
-    /// encodings, and extra header lines — real-world packs vary wildly.
-    /// Throws on malformed input.
+    /// Parse an Adobe .cube file. Supports LUT_3D_SIZE 2...128 — cubes
+    /// larger than 33 (e.g. the common 65x65x65 cinema packs) are resampled
+    /// down to 33 with trilinear interpolation, which keeps full grading
+    /// quality while staying fast in Core Image. 1D LUTs are expanded into
+    /// a 3D cube. Tolerant of BOMs, tabs, CRLF, non-UTF8 encodings, and
+    /// extra header lines — real-world packs vary wildly. Throws on
+    /// malformed input.
     static func parse(url: URL, name: String) throws -> LoadedLUT {
         guard let data = try? Data(contentsOf: url),
               let rawText = String(data: data, encoding: .utf8)
@@ -81,9 +84,12 @@ struct CubeLUT {
             rgb.append(contentsOf: [r, g, b])
         }
         if let n = size3D {
-            guard (2...64).contains(n) else { throw CubeError.badSize }
+            guard (2...128).contains(n) else { throw CubeError.badSize(n) }
             let needed = n * n * n * 3
             guard rgb.count >= needed else { throw CubeError.notEnoughData }
+            if n > 33 {
+                return resample3D(name: name, rgb: rgb, from: n, to: 33, fileName: url.lastPathComponent)
+            }
             // Build RGBA float array (alpha = 1), preserving file order.
             var rgba: [Float] = []
             rgba.reserveCapacity(n * n * n * 4)
@@ -97,7 +103,7 @@ struct CubeLUT {
             return LoadedLUT(name: name, size: n, data: rgba, cubeData: cubeData, fileName: url.lastPathComponent)
         }
         if let n = size1D {
-            guard (2...1024).contains(n) else { throw CubeError.badSize }
+            guard (2...1024).contains(n) else { throw CubeError.badSize(n) }
             guard rgb.count >= n * 3 else { throw CubeError.notEnoughData }
             return expand1D(name: name, curve: rgb, count: n, fileName: url.lastPathComponent)
         }
@@ -110,6 +116,50 @@ struct CubeLUT {
         let rest = line.dropFirst(key.count)
         return rest.components(separatedBy: CharacterSet.decimalDigits.inverted)
             .compactMap { Int($0) }.first
+    }
+
+    /// Resamples a large 3D cube (e.g. 65) down to a smaller grid (33) with
+    /// trilinear interpolation. File order is b-outer, g-middle, r-inner.
+    private static func resample3D(name: String, rgb: [Float], from n: Int, to m: Int, fileName: String) -> LoadedLUT {
+        func at(_ r: Int, _ g: Int, _ b: Int, _ c: Int) -> Float {
+            rgb[((b * n + g) * n + r) * 3 + c]
+        }
+        func sample(r: Float, g: Float, b: Float, channel: Int) -> Float {
+            let fr = min(max(r, 0), 1) * Float(n - 1)
+            let fg = min(max(g, 0), 1) * Float(n - 1)
+            let fb = min(max(b, 0), 1) * Float(n - 1)
+            let r0 = Int(fr), g0 = Int(fg), b0 = Int(fb)
+            let r1 = min(r0 + 1, n - 1), g1 = min(g0 + 1, n - 1), b1 = min(b0 + 1, n - 1)
+            let tr = fr - Float(r0), tg = fg - Float(g0), tb = fb - Float(b0)
+            let c000 = at(r0, g0, b0, channel), c100 = at(r1, g0, b0, channel)
+            let c010 = at(r0, g1, b0, channel), c110 = at(r1, g1, b0, channel)
+            let c001 = at(r0, g0, b1, channel), c101 = at(r1, g0, b1, channel)
+            let c011 = at(r0, g1, b1, channel), c111 = at(r1, g1, b1, channel)
+            let c00 = c000 + (c100 - c000) * tr
+            let c10 = c010 + (c110 - c010) * tr
+            let c01 = c001 + (c101 - c001) * tr
+            let c11 = c011 + (c111 - c011) * tr
+            let c0 = c00 + (c10 - c00) * tg
+            let c1 = c01 + (c11 - c01) * tg
+            return c0 + (c1 - c0) * tb
+        }
+        var rgba: [Float] = []
+        rgba.reserveCapacity(m * m * m * 4)
+        for b in 0..<m {
+            for g in 0..<m {
+                for r in 0..<m {
+                    let fr = Float(r) / Float(m - 1)
+                    let fg = Float(g) / Float(m - 1)
+                    let fb = Float(b) / Float(m - 1)
+                    rgba.append(sample(r: fr, g: fg, b: fb, channel: 0))
+                    rgba.append(sample(r: fr, g: fg, b: fb, channel: 1))
+                    rgba.append(sample(r: fr, g: fg, b: fb, channel: 2))
+                    rgba.append(1.0)
+                }
+            }
+        }
+        let cubeData = Data(bytes: &rgba, count: rgba.count * MemoryLayout<Float>.size)
+        return LoadedLUT(name: name, size: m, data: rgba, cubeData: cubeData, fileName: fileName)
     }
 
     /// Expands a 1D per-channel curve into a 3D cube (each channel driven by
