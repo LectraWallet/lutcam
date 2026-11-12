@@ -1,12 +1,14 @@
 import CoreImage
 import UIKit
 
-/// A parsed .cube 3D LUT. Cube data is stored as RGBA floats, size^3 entries.
+/// A parsed .cube 3D LUT. Cube data is stored as RGBA floats, size^3 entries,
+/// plus a prebuilt Data blob so live grading never copies the array per frame.
 struct LoadedLUT: Identifiable, Equatable {
     let id = UUID()
     let name: String
     let size: Int
     let data: [Float]
+    let cubeData: Data
     /// File name in the app's LUTs folder (nil for in-memory only).
     let fileName: String?
 
@@ -60,42 +62,44 @@ struct CubeLUT {
             rgba.append(rgb[i * 3 + 2])
             rgba.append(1.0)
         }
-        return LoadedLUT(name: name, size: n, data: rgba, fileName: url.lastPathComponent)
+        let cubeData = Data(bytes: &rgba, count: rgba.count * MemoryLayout<Float>.size)
+        return LoadedLUT(name: name, size: n, data: rgba, cubeData: cubeData, fileName: url.lastPathComponent)
+    }
+
+    /// Grade a CIImage with the LUT at the given strength (0...1). Returns the
+    /// input unchanged on any failure — grading must never lose a frame.
+    static func grade(_ input: CIImage, lut: LoadedLUT, strength: Float) -> CIImage {
+        let clamped = min(1, max(0, strength))
+        guard clamped > 0.001 else { return input }
+        let extent = input.extent
+        guard extent.width > 0, extent.height > 0 else { return input }
+
+        guard let cubeFilter = CIFilter(name: "CIColorCube") else { return input }
+        cubeFilter.setValue(lut.size, forKey: "inputCubeDimension")
+        cubeFilter.setValue(lut.cubeData, forKey: "inputCubeData")
+        cubeFilter.setValue(input, forKey: kCIInputImageKey)
+        guard let filtered = cubeFilter.outputImage else { return input }
+
+        if clamped >= 0.999 { return filtered }
+
+        // Blend filtered over original with a constant mask at `strength` alpha.
+        guard let maskGen = CIFilter(name: "CIConstantColorGenerator") else { return input }
+        maskGen.setValue(CIColor(red: 1, green: 1, blue: 1, alpha: CGFloat(clamped)), forKey: kCIInputColorKey)
+        guard let mask = maskGen.outputImage?.cropped(to: extent),
+              let blend = CIFilter(name: "CIBlendWithMask") else { return input }
+        blend.setValue(filtered, forKey: kCIInputImageKey)
+        blend.setValue(input, forKey: kCIInputBackgroundImageKey)
+        blend.setValue(mask, forKey: kCIInputMaskImageKey)
+        return blend.outputImage ?? input
     }
 
     /// Apply the LUT to an image at the given strength (0...1). Returns the
     /// original image on any failure — applying a LUT must never lose a photo.
     static func apply(to image: UIImage, lut: LoadedLUT, strength: Float, context: CIContext) -> UIImage {
-        let clamped = min(1, max(0, strength))
-        guard clamped > 0.001 else { return image }
         guard let ciInput = CIImage(image: image) else { return image }
         let extent = ciInput.extent
         guard extent.width > 0, extent.height > 0 else { return image }
-
-        var cubeData = lut.data
-        let data = Data(bytes: &cubeData, count: cubeData.count * MemoryLayout<Float>.size)
-        guard let cubeFilter = CIFilter(name: "CIColorCube") else { return image }
-        cubeFilter.setValue(lut.size, forKey: "inputCubeDimension")
-        cubeFilter.setValue(data, forKey: "inputCubeData")
-        cubeFilter.setValue(ciInput, forKey: kCIInputImageKey)
-        guard let filtered = cubeFilter.outputImage else { return image }
-
-        let result: CIImage
-        if clamped >= 0.999 {
-            result = filtered
-        } else {
-            // Blend filtered over original with a constant mask at `strength` alpha.
-            guard let maskGen = CIFilter(name: "CIConstantColorGenerator") else { return image }
-            maskGen.setValue(CIColor(red: 1, green: 1, blue: 1, alpha: CGFloat(clamped)), forKey: kCIInputColorKey)
-            guard let mask = maskGen.outputImage?.cropped(to: extent),
-                  let blend = CIFilter(name: "CIBlendWithMask") else { return image }
-            blend.setValue(filtered, forKey: kCIInputImageKey)
-            blend.setValue(ciInput, forKey: kCIInputBackgroundImageKey)
-            blend.setValue(mask, forKey: kCIInputMaskImageKey)
-            guard let blended = blend.outputImage else { return image }
-            result = blended
-        }
-
+        let result = grade(ciInput, lut: lut, strength: strength)
         guard let cg = context.createCGImage(result, from: extent) else { return image }
         return UIImage(cgImage: cg, scale: image.scale, orientation: image.imageOrientation)
     }

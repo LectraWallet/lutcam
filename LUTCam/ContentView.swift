@@ -1,4 +1,5 @@
 import AVFoundation
+import MetalKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -26,39 +27,25 @@ extension View {
     func glassPanel(radius: CGFloat = 24) -> some View { modifier(GlassPanel(radius: radius)) }
 }
 
-// MARK: - Preview
+// MARK: - Live preview (Metal view drawn by the camera model, LUT graded)
 
-struct CameraPreview: UIViewRepresentable {
-    let session: AVCaptureSession
+struct LiveCameraView: UIViewRepresentable {
+    @ObservedObject var model: CameraModel
 
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView()
+    func makeUIView(context: Context) -> MTKView {
+        let view = MTKView()
+        view.device = model.metalDevice
+        view.framebufferOnly = false
+        view.isPaused = true
+        view.enableSetNeedsDisplay = false
         view.backgroundColor = .black
-        let layer = AVCaptureVideoPreviewLayer(session: session)
-        layer.videoGravity = .resizeAspectFill
-        view.layer.addSublayer(layer)
-        context.coordinator.layer = layer
+        view.contentScaleFactor = UIScreen.main.scale
+        model.previewView = view
         return view
     }
 
-    func updateUIView(_ view: UIView, context: Context) {
-        context.coordinator.layer?.frame = view.bounds
-        if let connection = context.coordinator.layer?.connection,
-           connection.isVideoOrientationSupported,
-           let orientation = view.window?.windowScene?.interfaceOrientation {
-            switch orientation {
-            case .landscapeLeft: connection.videoOrientation = .landscapeRight
-            case .landscapeRight: connection.videoOrientation = .landscapeLeft
-            case .portraitUpsideDown: connection.videoOrientation = .portraitUpsideDown
-            default: connection.videoOrientation = .portrait
-            }
-        }
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator() }
-
-    final class Coordinator {
-        var layer: AVCaptureVideoPreviewLayer?
+    func updateUIView(_ view: MTKView, context: Context) {
+        model.previewView = view
     }
 }
 
@@ -70,15 +57,22 @@ private enum ControlTab: String, CaseIterable {
     case wb = "WB"
     case focus = "Focus"
     case ev = "EV"
+    case zoom = "Zoom"
+}
+
+private enum CaptureMode {
+    case photo, video
 }
 
 struct ContentView: View {
     @StateObject private var model = CameraModel()
     @State private var tab: ControlTab = .iso
+    @State private var mode: CaptureMode = .photo
     @State private var showLUTs = false
     @State private var showImporter = false
     @State private var focusPoint: CGPoint?
     @State private var showFocusRing = false
+    @State private var pinchBase: CGFloat?
 
     var body: some View {
         ZStack {
@@ -94,11 +88,6 @@ struct ContentView: View {
         }
         .onAppear { model.start() }
         .sheet(isPresented: $showLUTs) { lutSheet }
-        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.data], allowsMultipleSelection: false) { result in
-            if case .success(let urls) = result, let url = urls.first {
-                model.importLUT(from: url)
-            }
-        }
         .alert("LUT problem", isPresented: Binding(
             get: { model.lutError != nil },
             set: { if !$0 { model.lutError = nil } }
@@ -140,7 +129,7 @@ struct ContentView: View {
     private var cameraView: some View {
         GeometryReader { geo in
             ZStack {
-                CameraPreview(session: model.session)
+                LiveCameraView(model: model)
                     .ignoresSafeArea()
                     .onTapGesture { location in
                         let point = CGPoint(x: location.x / geo.size.width, y: location.y / geo.size.height)
@@ -151,6 +140,14 @@ struct ContentView: View {
                             withAnimation { showFocusRing = false }
                         }
                     }
+                    .simultaneousGesture(
+                        MagnificationGesture()
+                            .onChanged { value in
+                                if pinchBase == nil { pinchBase = model.zoomFactor }
+                                model.setZoom((pinchBase ?? 1) * value)
+                            }
+                            .onEnded { _ in pinchBase = nil }
+                    )
 
                 if showFocusRing, let p = focusPoint {
                     RoundedRectangle(cornerRadius: 6)
@@ -172,6 +169,7 @@ struct ContentView: View {
                             .background(.white, in: Capsule())
                             .padding(.bottom, 8)
                     }
+                    lutStrip
                     controlDeck
                 }
                 .padding(.horizontal, 12)
@@ -200,6 +198,14 @@ struct ContentView: View {
                 .glassCapsule()
             }
             Spacer()
+            if model.isRecording {
+                Text("● \(formatTime(model.recordingSeconds))")
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .glassCapsule()
+            }
             Text(liveReadout)
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.white.opacity(0.85))
@@ -212,7 +218,53 @@ struct ContentView: View {
     private var liveReadout: String {
         let iso = model.liveISO > 0 ? "ISO \(Int(model.liveISO))" : "ISO —"
         let sh = model.liveShutter > 0 ? formatShutter(model.liveShutter) : "—"
-        return "\(iso)  \(sh)  \(Int(model.liveWB))K"
+        let zoom = String(format: "%.1f×", model.zoomFactor)
+        return "\(iso)  \(sh)  \(Int(model.liveWB))K  \(zoom)"
+    }
+
+    private func formatTime(_ seconds: Int) -> String {
+        String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+
+    // MARK: - LUT hot-swap strip
+
+    private var lutStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                lutChip(title: "None", selected: model.selectedLUT == nil) {
+                    model.selectLUT(nil)
+                }
+                ForEach(model.luts) { lut in
+                    lutChip(title: lut.name, selected: model.selectedLUT?.id == lut.id) {
+                        model.selectLUT(lut)
+                    }
+                }
+                Button { showLUTs = true } label: {
+                    Image(systemName: "plus")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .glassCapsule()
+                }
+            }
+            .padding(.horizontal, 2)
+            .padding(.vertical, 2)
+        }
+        .padding(.bottom, 8)
+    }
+
+    private func lutChip(title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+                .foregroundStyle(selected ? .black : .white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(selected ? .white : .clear, in: Capsule())
+                .overlay(Capsule().stroke(.white.opacity(0.25), lineWidth: 0.5))
+        }
     }
 
     // MARK: - Control deck
@@ -238,6 +290,15 @@ struct ContentView: View {
             // Active control
             controlRow
 
+            // Photo / Video switch
+            HStack(spacing: 0) {
+                modeButton(.photo, "Photo")
+                modeButton(.video, "Video")
+            }
+            .padding(4)
+            .background(.black.opacity(0.35), in: Capsule())
+            .disabled(model.isRecording)
+
             // Shutter row
             HStack {
                 Button { showLUTs = true } label: {
@@ -248,12 +309,7 @@ struct ContentView: View {
                         .glassCapsule()
                 }
                 Spacer()
-                Button { model.capture() } label: {
-                    ZStack {
-                        Circle().stroke(.white, lineWidth: 4).frame(width: 72, height: 72)
-                        Circle().fill(.white).frame(width: 58, height: 58)
-                    }
-                }
+                shutterButton
                 Spacer()
                 Button(action: allAuto) {
                     Text("All Auto")
@@ -266,6 +322,44 @@ struct ContentView: View {
         }
         .padding(14)
         .glassPanel()
+    }
+
+    private func modeButton(_ m: CaptureMode, _ title: String) -> some View {
+        Button { mode = m } label: {
+            Text(title)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(mode == m ? .black : .white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 7)
+                .background(mode == m ? .white : .clear, in: Capsule())
+        }
+    }
+
+    private var shutterButton: some View {
+        Group {
+            if mode == .photo {
+                Button { model.capture() } label: {
+                    ZStack {
+                        Circle().stroke(.white, lineWidth: 4).frame(width: 72, height: 72)
+                        Circle().fill(.white).frame(width: 58, height: 58)
+                    }
+                }
+            } else if model.isRecording {
+                Button { model.stopRecording() } label: {
+                    ZStack {
+                        Circle().stroke(.white, lineWidth: 4).frame(width: 72, height: 72)
+                        RoundedRectangle(cornerRadius: 6).fill(.red).frame(width: 30, height: 30)
+                    }
+                }
+            } else {
+                Button { model.startRecording() } label: {
+                    ZStack {
+                        Circle().stroke(.white, lineWidth: 4).frame(width: 72, height: 72)
+                        Circle().fill(.red).frame(width: 58, height: 58)
+                    }
+                }
+            }
+        }
     }
 
     private func allAuto() {
@@ -355,6 +449,22 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+        case .zoom:
+            ControlRow(
+                title: "Zoom",
+                valueText: String(format: "%.1f×", model.zoomFactor),
+                isAuto: nil,
+                onAutoToggle: nil
+            ) {
+                Slider(value: Binding(
+                    get: { logZoomPosition(model.zoomFactor) },
+                    set: { model.setZoom(zoomFromLog($0)) }
+                ), in: 0...1)
+            }
+            Text("Pinch the screen to zoom too. Past about 10× it gets blurry — that's digital zoom, not the lens.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -370,6 +480,17 @@ struct ContentView: View {
         let lo = log(max(model.shutterRange.lowerBound, 1e-6))
         let hi = log(max(model.shutterRange.upperBound, lo + 0.01))
         return exp(lo + min(1, max(0, t)) * (hi - lo))
+    }
+
+    // Log-scale mapping for the zoom slider (even feel across 1×...max).
+    private func logZoomPosition(_ factor: CGFloat) -> Double {
+        let hi = log(max(Double(model.maxZoom), 1.01))
+        return min(1, max(0, log(max(Double(factor), 1)) / hi))
+    }
+
+    private func zoomFromLog(_ t: Double) -> CGFloat {
+        let hi = log(max(Double(model.maxZoom), 1.01))
+        return CGFloat(exp(min(1, max(0, t)) * hi))
     }
 
     private func formatShutter(_ seconds: Double) -> String {
@@ -390,7 +511,7 @@ struct ContentView: View {
             List {
                 Section {
                     Button {
-                        model.selectedLUT = nil
+                        model.selectLUT(nil)
                     } label: {
                         HStack {
                             Text("No LUT").foregroundStyle(.white)
@@ -405,7 +526,7 @@ struct ContentView: View {
                 Section("Your LUTs") {
                     ForEach(model.luts) { lut in
                         Button {
-                            model.selectedLUT = lut
+                            model.selectLUT(lut)
                         } label: {
                             HStack {
                                 Text(lut.name).foregroundStyle(.white)
@@ -430,7 +551,10 @@ struct ContentView: View {
                                 .font(.subheadline.monospacedDigit())
                                 .foregroundStyle(.white)
                                 .frame(width: 44, alignment: .leading)
-                            Slider(value: $model.lutStrength, in: 0...1)
+                            Slider(value: Binding(
+                                get: { Double(model.lutStrength) },
+                                set: { model.setLUTStrength(Float($0)) }
+                            ), in: 0...1)
                         }
                         .listRowBackground(Color(white: 0.12))
                     }
@@ -445,12 +569,14 @@ struct ContentView: View {
                     Button("Done") { showLUTs = false }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button {
-                        showLUTs = false
-                        showImporter = true
-                    } label: {
+                    Button { showImporter = true } label: {
                         Label("Import LUT", systemImage: "square.and.arrow.down")
                     }
+                }
+            }
+            .fileImporter(isPresented: $showImporter, allowedContentTypes: [.data], allowsMultipleSelection: false) { result in
+                if case .success(let urls) = result, let url = urls.first {
+                    model.importLUT(from: url)
                 }
             }
         }

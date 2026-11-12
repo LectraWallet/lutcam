@@ -1,5 +1,8 @@
 import AVFoundation
 import CoreImage
+import CoreVideo
+import Metal
+import MetalKit
 import Photos
 import UIKit
 
@@ -42,21 +45,72 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var manualFocus: Float = 0.5
     @Published var exposureBias: Float = 0
 
+    // Zoom. maxZoom is read from the device and capped at 100.
+    @Published var zoomFactor: CGFloat = 1
+    @Published var maxZoom: CGFloat = 10
+
     // LUTs
     @Published var luts: [LoadedLUT] = []
     @Published var selectedLUT: LoadedLUT?
     @Published var lutStrength: Float = 0.7
     @Published var lutError: String?
 
+    // Recording
+    @Published var isRecording = false
+    @Published var recordingSeconds = 0
+
     // MARK: - Capture machinery
 
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "lutcam.session", qos: .userInitiated)
+    private let captureQueue = DispatchQueue(label: "lutcam.capture", qos: .userInitiated)
     private let photoOutput = AVCapturePhotoOutput()
+    private let videoOutput = AVCaptureVideoDataOutput()
+    private let audioOutput = AVCaptureAudioDataOutput()
     private var device: AVCaptureDevice?
     private var activeDelegates: [PhotoCaptureDelegate] = []
     private var observations: [NSKeyValueObservation] = []
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    private var hasMicInput = false
+
+    // MARK: - Live preview (Metal)
+
+    /// The on-screen Metal view, set by the SwiftUI wrapper. Weak: the view owns itself.
+    weak var previewView: MTKView?
+    let metalDevice = MTLCreateSystemDefaultDevice()
+    private var metalContext: CIContext?
+    private var commandQueue: MTLCommandQueue?
+
+    // MARK: - Live grading recipe (lock-guarded: written on main, read on captureQueue)
+
+    private struct GradeRecipe {
+        var lut: LoadedLUT?
+        var strength: Float
+    }
+    private var gradeRecipe = GradeRecipe(lut: nil, strength: 0.7)
+    private let gradeLock = NSLock()
+
+    // MARK: - Recording machinery (captureQueue-confined unless noted)
+
+    private var isCapturing = false
+    private var writer: AVAssetWriter?
+    private var videoInput: AVAssetWriterInput?
+    private var audioInput: AVAssetWriterInput?
+    private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
+    private var pixelPool: CVPixelBufferPool?
+    private var recordingURL: URL?
+    private var writerSessionStarted = false
+    private var finishing = false
+    private var videoSize: CGSize = .zero
+    private var recordTimer: Timer?
+
+    override init() {
+        super.init()
+        if let metalDevice {
+            metalContext = CIContext(mtlDevice: metalDevice)
+            commandQueue = metalDevice.makeCommandQueue()
+        }
+    }
 
     // MARK: - Setup
 
@@ -77,6 +131,7 @@ final class CameraModel: NSObject, ObservableObject {
         default:
             permissionDenied = true
         }
+        requestMicAccess()
         loadSavedLUTs()
     }
 
@@ -86,11 +141,41 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
+    private func requestMicAccess() {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            addMicInput()
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+                if granted { self?.addMicInput() }
+            }
+        default:
+            break
+        }
+    }
+
+    private func addMicInput() {
+        sessionQueue.async { [weak self] in
+            guard let self, !self.hasMicInput, self.session.isRunning else { return }
+            guard let mic = AVCaptureDevice.default(for: .audio),
+                  let input = try? AVCaptureDeviceInput(device: mic),
+                  self.session.canAddInput(input) else { return }
+            self.session.beginConfiguration()
+            self.session.addInput(input)
+            self.session.commitConfiguration()
+            self.hasMicInput = true
+        }
+    }
+
     private func configure() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.session.beginConfiguration()
-            self.session.sessionPreset = .photo
+            if self.session.canSetSessionPreset(.hd4K3840x2160) {
+                self.session.sessionPreset = .hd4K3840x2160
+            } else if self.session.canSetSessionPreset(.high) {
+                self.session.sessionPreset = .high
+            }
 
             guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
                   let input = try? AVCaptureDeviceInput(device: device),
@@ -107,12 +192,28 @@ final class CameraModel: NSObject, ObservableObject {
                 return
             }
             self.session.addOutput(self.photoOutput)
+
+            // Live video frames: graded + drawn by Metal, and written while recording.
+            self.videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+            self.videoOutput.alwaysDiscardsLateVideoFrames = true
+            self.videoOutput.setSampleBufferDelegate(self, queue: self.captureQueue)
+            if self.session.canAddOutput(self.videoOutput) {
+                self.session.addOutput(self.videoOutput)
+            }
+            self.audioOutput.setSampleBufferDelegate(self, queue: self.captureQueue)
+            if self.session.canAddOutput(self.audioOutput) {
+                self.session.addOutput(self.audioOutput)
+            }
+
             self.device = device
             self.session.commitConfiguration()
 
             self.readRanges(from: device)
             self.observe(device: device)
             self.session.startRunning()
+            if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
+                self.addMicInput()
+            }
             DispatchQueue.main.async { self.isReady = true }
         }
     }
@@ -127,10 +228,12 @@ final class CameraModel: NSObject, ObservableObject {
         let shMax = (maxDur > 0 && maxDur.isFinite) ? min(maxDur, 1.0) : (1.0 / 30)
         let biasMin = device.minExposureTargetBias
         let biasMax = device.maxExposureTargetBias
+        let zoomMax = min(max(1, device.maxAvailableVideoZoomFactor), 100)
         DispatchQueue.main.async {
             self.isoRange = isoMin...isoMax
             self.shutterRange = shMin...max(shMin, shMax)
             self.biasRange = biasMin...biasMax
+            self.maxZoom = zoomMax
             self.manualISO = min(max(100, isoMin), isoMax)
             self.manualShutter = min(max(1.0 / 120, shMin), max(shMin, shMax))
         }
@@ -292,22 +395,61 @@ final class CameraModel: NSObject, ObservableObject {
         device.setFocusModeLocked(lensPosition: min(max(manualFocus, 0), 1), completionHandler: nil)
     }
 
+    /// Tap point in view coordinates (origin top-left). Converted to the
+    /// device's point-of-interest space for the portrait back camera.
     func focusAt(point: CGPoint) {
+        let devicePoint = CGPoint(x: point.y, y: 1 - point.x)
         sessionQueue.async { [weak self] in
             self?.withDevice { device in
                 if device.isFocusPointOfInterestSupported, device.isFocusModeSupported(.autoFocus) {
-                    device.focusPointOfInterest = point
+                    device.focusPointOfInterest = devicePoint
                     device.focusMode = .autoFocus
                 }
                 if device.isExposurePointOfInterestSupported, device.isExposureModeSupported(.autoExpose) {
-                    device.exposurePointOfInterest = point
+                    device.exposurePointOfInterest = devicePoint
                     device.exposureMode = .autoExpose
                 }
             }
         }
     }
 
-    // MARK: - Capture
+    // MARK: - Zoom
+
+    func setZoom(_ factor: CGFloat) {
+        let clamped = min(max(factor, 1), maxZoom)
+        zoomFactor = clamped
+        sessionQueue.async { [weak self] in
+            self?.withDevice { device in
+                device.videoZoomFactor = clamped
+            }
+        }
+    }
+
+    // MARK: - LUT selection (keeps the live grading recipe in sync)
+
+    func selectLUT(_ lut: LoadedLUT?) {
+        selectedLUT = lut
+        updateRecipe()
+    }
+
+    func setLUTStrength(_ strength: Float) {
+        lutStrength = strength
+        updateRecipe()
+    }
+
+    private func updateRecipe() {
+        gradeLock.lock()
+        gradeRecipe = GradeRecipe(lut: selectedLUT, strength: lutStrength)
+        gradeLock.unlock()
+    }
+
+    private func currentRecipe() -> GradeRecipe {
+        gradeLock.lock()
+        defer { gradeLock.unlock() }
+        return gradeRecipe
+    }
+
+    // MARK: - Photo capture
 
     func capture() {
         sessionQueue.async { [weak self] in
@@ -345,12 +487,132 @@ final class CameraModel: NSObject, ObservableObject {
             PHPhotoLibrary.shared().performChanges({
                 PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: nil)
             }) { success, _ in
-                if success {
-                    DispatchQueue.main.async {
-                        self?.savedFlash = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { self?.savedFlash = false }
-                    }
+                if success { self?.flashSaved() }
+            }
+        }
+    }
+
+    private func flashSaved() {
+        DispatchQueue.main.async {
+            self.savedFlash = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { self.savedFlash = false }
+        }
+    }
+
+    // MARK: - Video recording (LUT burned in, with audio when the mic is on)
+
+    func startRecording() {
+        captureQueue.async { [weak self] in
+            guard let self, !self.isCapturing, self.writer == nil, self.videoSize.width > 0 else { return }
+            let width = Int(self.videoSize.width)
+            let height = Int(self.videoSize.height)
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension("mov")
+            try? FileManager.default.removeItem(at: url)
+            guard let writer = try? AVAssetWriter(url: url, fileType: .mov) else { return }
+
+            let videoSettings: [String: Any] = [
+                AVVideoCodecKey: AVVideoCodecType.hevc,
+                AVVideoWidthKey: width,
+                AVVideoHeightKey: height,
+            ]
+            let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+            vInput.expectsMediaDataInRealTime = true
+            guard writer.canAdd(vInput) else { return }
+            writer.add(vInput)
+
+            var aInput: AVAssetWriterInput?
+            if self.hasMicInput {
+                let audioSettings: [String: Any] = [
+                    AVFormatIDKey: kAudioFormatMPEG4AAC,
+                    AVSampleRateKey: 44100,
+                    AVNumberOfChannelsKey: 2,
+                    AVEncoderBitRateKey: 128000,
+                ]
+                let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+                input.expectsMediaDataInRealTime = true
+                if writer.canAdd(input) {
+                    writer.add(input)
+                    aInput = input
                 }
+            }
+
+            let poolAttrs: [String: Any] = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: width,
+                kCVPixelBufferHeightKey as String: height,
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+            ]
+            var pool: CVPixelBufferPool?
+            guard CVPixelBufferPoolCreate(nil, nil, poolAttrs as CFDictionary, &pool) == kCVReturnSuccess,
+                  let pool else { return }
+
+            self.writer = writer
+            self.videoInput = vInput
+            self.audioInput = aInput
+            self.adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: vInput, sourcePixelBufferAttributes: nil)
+            self.pixelPool = pool
+            self.recordingURL = url
+            self.writerSessionStarted = false
+            self.finishing = false
+            writer.startWriting()
+            self.isCapturing = true
+            DispatchQueue.main.async {
+                self.isRecording = true
+                self.recordingSeconds = 0
+                self.recordTimer?.invalidate()
+                self.recordTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                    self?.recordingSeconds += 1
+                }
+            }
+        }
+    }
+
+    func stopRecording() {
+        captureQueue.async { [weak self] in
+            guard let self, self.isCapturing, let writer = self.writer else { return }
+            self.finishing = true
+            self.videoInput?.markAsFinished()
+            self.audioInput?.markAsFinished()
+            let url = self.recordingURL
+            writer.finishWriting { [weak self] in
+                guard let self else { return }
+                let success = writer.status == .completed
+                self.writer = nil
+                self.videoInput = nil
+                self.audioInput = nil
+                self.adaptor = nil
+                self.pixelPool = nil
+                self.recordingURL = nil
+                self.writerSessionStarted = false
+                self.finishing = false
+                self.isCapturing = false
+                DispatchQueue.main.async {
+                    self.isRecording = false
+                    self.recordTimer?.invalidate()
+                    self.recordTimer = nil
+                }
+                if success, let url {
+                    self.saveVideo(at: url)
+                } else if let url {
+                    try? FileManager.default.removeItem(at: url)
+                }
+            }
+        }
+    }
+
+    private func saveVideo(at url: URL) {
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] status in
+            guard status == .authorized || status == .limited else {
+                try? FileManager.default.removeItem(at: url)
+                return
+            }
+            PHPhotoLibrary.shared().performChanges({
+                PHAssetCreationRequest.forAsset().addResource(with: .video, fileURL: url, options: nil)
+            }) { success, _ in
+                try? FileManager.default.removeItem(at: url)
+                if success { self?.flashSaved() }
             }
         }
     }
@@ -404,7 +666,7 @@ final class CameraModel: NSObject, ObservableObject {
                 self.luts.removeAll { $0.name == lut.name }
                 self.luts.append(lut)
                 self.luts.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-                self.selectedLUT = lut
+                self.selectLUT(lut)
                 self.lutError = nil
             }
         } catch {
@@ -418,7 +680,79 @@ final class CameraModel: NSObject, ObservableObject {
             try? FileManager.default.removeItem(at: folder.appendingPathComponent(fileName))
         }
         luts.removeAll { $0.id == lut.id }
-        if selectedLUT?.id == lut.id { selectedLUT = nil }
+        if selectedLUT?.id == lut.id { selectLUT(nil) }
+    }
+}
+
+// MARK: - Live frames: grade, draw to Metal, write while recording
+
+extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        if output === audioOutput {
+            if isCapturing, writerSessionStarted, !finishing,
+               let aInput = audioInput, aInput.isReadyForMoreMediaData {
+                aInput.append(sampleBuffer)
+            }
+            return
+        }
+        guard output === videoOutput,
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        // Sensor frames arrive landscape; rotate to portrait upright for the back camera.
+        var image = CIImage(cvPixelBuffer: pixelBuffer).oriented(.right)
+        let recipe = currentRecipe()
+        if let lut = recipe.lut {
+            image = CubeLUT.grade(image, lut: lut, strength: recipe.strength)
+        }
+        let extent = image.extent
+        if videoSize != extent.size { videoSize = extent.size }
+
+        renderPreview(image)
+
+        if isCapturing, !finishing {
+            appendVideoFrame(image, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+        }
+    }
+
+    private func renderPreview(_ image: CIImage) {
+        guard let metalContext, let commandQueue,
+              let view = previewView,
+              let drawable = view.currentDrawable,
+              let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+        let drawableSize = view.drawableSize
+        guard drawableSize.width > 0, drawableSize.height > 0 else { return }
+
+        // Aspect-fill: center-crop the frame to the drawable's aspect.
+        let extent = image.extent
+        let imageAspect = extent.width / extent.height
+        let viewAspect = drawableSize.width / drawableSize.height
+        var crop = extent
+        if imageAspect > viewAspect {
+            let w = extent.height * viewAspect
+            crop = CGRect(x: extent.midX - w / 2, y: extent.minY, width: w, height: extent.height)
+        } else {
+            let h = extent.width / viewAspect
+            crop = CGRect(x: extent.minX, y: extent.midY - h / 2, width: extent.width, height: h)
+        }
+        metalContext.render(image, to: drawable.texture, commandBuffer: commandBuffer, bounds: crop, colorSpace: CGColorSpaceCreateDeviceRGB())
+        commandBuffer.present(drawable)
+        commandBuffer.commit()
+    }
+
+    private func appendVideoFrame(_ image: CIImage, pts: CMTime) {
+        guard let writer, writer.status == .writing,
+              let vInput = videoInput, let adaptor, let pool = pixelPool,
+              let metalContext else { return }
+        if !writerSessionStarted {
+            writer.startSession(atSourceTime: pts)
+            writerSessionStarted = true
+        }
+        guard vInput.isReadyForMoreMediaData else { return }
+        var px: CVPixelBuffer?
+        guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &px) == kCVReturnSuccess, let px else { return }
+        metalContext.render(image, to: px)
+        adaptor.append(px, withPresentationTime: pts)
     }
 }
 
