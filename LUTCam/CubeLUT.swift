@@ -28,50 +28,115 @@ enum CubeError: Error {
     case noSize
     case badSize
     case notEnoughData
+
+    var reason: String {
+        switch self {
+        case .unreadable: return "the file could not be read as text"
+        case .noSize: return "no LUT_3D_SIZE or LUT_1D_SIZE line found"
+        case .badSize: return "unsupported LUT size"
+        case .notEnoughData: return "not enough color data for the stated size"
+        }
+    }
 }
 
 struct CubeLUT {
 
-    /// Parse an Adobe .cube file. Supports LUT_3D_SIZE 2...64. Throws on malformed input.
+    /// Parse an Adobe .cube file. Supports LUT_3D_SIZE 2...64 and 1D LUTs
+    /// (expanded into a 3D cube). Tolerant of BOMs, tabs, CRLF, non-UTF8
+    /// encodings, and extra header lines — real-world packs vary wildly.
+    /// Throws on malformed input.
     static func parse(url: URL, name: String) throws -> LoadedLUT {
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+        guard let data = try? Data(contentsOf: url),
+              let rawText = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .utf16)
+                ?? String(data: data, encoding: .isoLatin1) else {
             throw CubeError.unreadable
         }
-        var size: Int?
+        // Strip a UTF-8 BOM so the first header line still matches.
+        let text = rawText.replacingOccurrences(of: "\u{FEFF}", with: "")
+        var size3D: Int?
+        var size1D: Int?
         var rgb: [Float] = []
         rgb.reserveCapacity(33 * 33 * 33 * 3)
         for rawLine in text.components(separatedBy: .newlines) {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             if line.isEmpty || line.hasPrefix("#") { continue }
-            if line.hasPrefix("LUT_3D_SIZE") {
-                let parts = line.split(separator: " ")
-                if let last = parts.last, let n = Int(last) { size = n }
+            let upper = line.uppercased()
+            if upper.hasPrefix("LUT_3D_SIZE") {
+                size3D = firstInt(afterKey: "LUT_3D_SIZE", in: line)
                 continue
             }
-            if line.hasPrefix("LUT_1D") || line.hasPrefix("DOMAIN") || line.hasPrefix("TITLE") { continue }
-            // Data line: "r g b"
-            let parts = line.split(separator: " ", omittingEmptySubsequences: true)
+            if upper.hasPrefix("LUT_1D_SIZE") {
+                size1D = firstInt(afterKey: "LUT_1D_SIZE", in: line)
+                continue
+            }
+            if upper.hasPrefix("LUT_1D") || upper.hasPrefix("LUT_3D")
+                || upper.hasPrefix("DOMAIN") || upper.hasPrefix("TITLE") { continue }
+            // Data line: "r g b" separated by spaces and/or tabs.
+            let parts = line.split(whereSeparator: { $0.isWhitespace })
             guard parts.count >= 3,
                   let r = Float(parts[0]), let g = Float(parts[1]), let b = Float(parts[2]) else {
                 continue
             }
             rgb.append(contentsOf: [r, g, b])
         }
-        guard let n = size else { throw CubeError.noSize }
-        guard (2...64).contains(n) else { throw CubeError.badSize }
-        let needed = n * n * n * 3
-        guard rgb.count >= needed else { throw CubeError.notEnoughData }
-        // Build RGBA float array (alpha = 1).
+        if let n = size3D {
+            guard (2...64).contains(n) else { throw CubeError.badSize }
+            let needed = n * n * n * 3
+            guard rgb.count >= needed else { throw CubeError.notEnoughData }
+            // Build RGBA float array (alpha = 1), preserving file order.
+            var rgba: [Float] = []
+            rgba.reserveCapacity(n * n * n * 4)
+            for i in 0..<(n * n * n) {
+                rgba.append(rgb[i * 3])
+                rgba.append(rgb[i * 3 + 1])
+                rgba.append(rgb[i * 3 + 2])
+                rgba.append(1.0)
+            }
+            let cubeData = Data(bytes: &rgba, count: rgba.count * MemoryLayout<Float>.size)
+            return LoadedLUT(name: name, size: n, data: rgba, cubeData: cubeData, fileName: url.lastPathComponent)
+        }
+        if let n = size1D {
+            guard (2...1024).contains(n) else { throw CubeError.badSize }
+            guard rgb.count >= n * 3 else { throw CubeError.notEnoughData }
+            return expand1D(name: name, curve: rgb, count: n, fileName: url.lastPathComponent)
+        }
+        throw CubeError.noSize
+    }
+
+    /// First integer after the header key (skips the digit inside the key
+    /// itself, e.g. the "3" in LUT_3D_SIZE).
+    private static func firstInt(afterKey key: String, in line: String) -> Int? {
+        let rest = line.dropFirst(key.count)
+        return rest.components(separatedBy: CharacterSet.decimalDigits.inverted)
+            .compactMap { Int($0) }.first
+    }
+
+    /// Expands a 1D per-channel curve into a 3D cube (each channel driven by
+    /// its own coordinate), so 1D .cube files work with CIColorCube.
+    private static func expand1D(name: String, curve: [Float], count n: Int, fileName: String) -> LoadedLUT {
+        let m = min(n, 33)
+        func sample(channel: Int, at t: Float) -> Float {
+            let p = min(max(t, 0), 1) * Float(n - 1)
+            let i0 = Int(p)
+            let i1 = min(i0 + 1, n - 1)
+            let f = p - Float(i0)
+            return curve[i0 * 3 + channel] + (curve[i1 * 3 + channel] - curve[i0 * 3 + channel]) * f
+        }
         var rgba: [Float] = []
-        rgba.reserveCapacity(n * n * n * 4)
-        for i in 0..<(n * n * n) {
-            rgba.append(rgb[i * 3])
-            rgba.append(rgb[i * 3 + 1])
-            rgba.append(rgb[i * 3 + 2])
-            rgba.append(1.0)
+        rgba.reserveCapacity(m * m * m * 4)
+        for b in 0..<m {
+            for g in 0..<m {
+                for r in 0..<m {
+                    rgba.append(sample(channel: 0, at: Float(r) / Float(m - 1)))
+                    rgba.append(sample(channel: 1, at: Float(g) / Float(m - 1)))
+                    rgba.append(sample(channel: 2, at: Float(b) / Float(m - 1)))
+                    rgba.append(1.0)
+                }
+            }
         }
         let cubeData = Data(bytes: &rgba, count: rgba.count * MemoryLayout<Float>.size)
-        return LoadedLUT(name: name, size: n, data: rgba, cubeData: cubeData, fileName: url.lastPathComponent)
+        return LoadedLUT(name: name, size: m, data: rgba, cubeData: cubeData, fileName: fileName)
     }
 
     /// Grade a CIImage with the LUT at the given strength (0...1). Returns the
