@@ -629,12 +629,23 @@ private struct ControlRow<Content: View>: View {
 
 // MARK: - Review
 
+/// Shared cancellation flag for the upscaler (read from a background queue).
+private final class CancelBox {
+    var cancelled = false
+}
+
 private struct ReviewView: View {
     @ObservedObject var model: CameraModel
     let photo: CapturedPhoto
     @State private var strength: Float = 0.7
     @State private var displayed: UIImage?
     @State private var work: DispatchWorkItem?
+    @State private var isUpscaling = false
+    @State private var upscaleProgress = 0.0
+    @State private var upscaleError: String?
+    @State private var isUpscaled = false
+    @State private var upscaleTask: Task<Void, Never>?
+    @State private var cancelBox = CancelBox()
 
     var body: some View {
         ZStack {
@@ -661,6 +672,34 @@ private struct ReviewView: View {
                                 .foregroundStyle(.secondary)
                                 .frame(width: 44, alignment: .trailing)
                         }
+                    }
+                    if isUpscaling {
+                        VStack(spacing: 8) {
+                            ProgressView(value: upscaleProgress)
+                                .tint(.white)
+                            HStack {
+                                Text("Upscaling… \(Int(upscaleProgress * 100))%")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.white)
+                                Spacer()
+                                Button("Cancel") {
+                                    cancelBox.cancelled = true
+                                    upscaleTask?.cancel()
+                                }
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.white)
+                            }
+                        }
+                    } else {
+                        Button { startUpscale() } label: {
+                            Label(isUpscaled ? "Upscaled 4×" : "Upscale 4×", systemImage: "wand.and.stars")
+                                .font(.headline)
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                                .glassCapsule()
+                        }
+                        .disabled(displayed == nil || isUpscaled)
                     }
                     HStack(spacing: 12) {
                         Button("Retake") {
@@ -692,9 +731,46 @@ private struct ReviewView: View {
             strength = model.lutStrength
             scheduleRegrade(immediate: true)
         }
+        .onDisappear {
+            cancelBox.cancelled = true
+            upscaleTask?.cancel()
+        }
+        .alert("Upscale problem", isPresented: Binding(
+            get: { upscaleError != nil },
+            set: { if !$0 { upscaleError = nil } }
+        )) {
+            Button("OK", role: .cancel) { upscaleError = nil }
+        } message: {
+            Text(upscaleError ?? "")
+        }
+    }
+
+    private func startUpscale() {
+        guard let base = displayed, !isUpscaling, !isUpscaled else { return }
+        cancelBox.cancelled = false
+        isUpscaling = true
+        upscaleProgress = 0
+        let box = cancelBox
+        upscaleTask = Task {
+            do {
+                let out = try await Task.detached(priority: .userInitiated) {
+                    try Upscaler.shared.upscale(base, isCancelled: { box.cancelled }) { p in
+                        Task { @MainActor in upscaleProgress = p }
+                    }
+                }.value
+                displayed = out
+                isUpscaled = true
+            } catch {
+                if (error as? UpscaleError) != .cancelled {
+                    upscaleError = (error as? LocalizedError)?.errorDescription ?? "Upscaling failed."
+                }
+            }
+            isUpscaling = false
+        }
     }
 
     private func scheduleRegrade(immediate: Bool = false) {
+        isUpscaled = false
         work?.cancel()
         let item = DispatchWorkItem {
             let graded = model.graded(photo.original, strength: strength)
