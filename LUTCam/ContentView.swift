@@ -29,7 +29,7 @@ extension View {
 // MARK: - Live preview (system preview layer — the layer IS the view's backing
 // layer, so it always matches the view bounds; no manual frame sizing)
 
-private final class PreviewUIView: UIView {
+final class PreviewUIView: UIView {
     override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
     var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
 }
