@@ -697,7 +697,7 @@ extension CameraModel: AVCaptureFileOutputRecordingDelegate {
 
 // MARK: - Face metadata delegate
 
-extension CameraModel: AVCaptureMetadataObjectsDelegate {
+extension CameraModel: AVCaptureMetadataOutputObjectsDelegate {
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
         guard let layer = previewLayer else { return }
         let faces = metadataObjects.compactMap { $0 as? AVMetadataFaceObject }
