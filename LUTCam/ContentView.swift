@@ -751,6 +751,13 @@ private struct ReviewView: View {
     @State private var isUpscaled = false
     @State private var upscaleTask: Task<Void, Never>?
     @State private var cancelBox = CancelBox()
+    @State private var upscaledImage: UIImage?
+    @State private var beforeUpscale: UIImage?
+    @State private var showingBefore = false
+    @State private var zoom: CGFloat = 1
+    @State private var lastZoom: CGFloat = 1
+    @State private var zoomOffset = CGSize.zero
+    @State private var lastOffset = CGSize.zero
 
     var body: some View {
         ZStack {
@@ -759,6 +766,36 @@ private struct ReviewView: View {
                 Image(uiImage: displayed)
                     .resizable()
                     .scaledToFit()
+                    .scaleEffect(zoom)
+                    .offset(zoomOffset)
+                    .gesture(
+                        MagnificationGesture()
+                            .onChanged { zoom = min(max(lastZoom * $0, 1), 6) }
+                            .onEnded { _ in
+                                lastZoom = zoom
+                                if zoom <= 1.01 {
+                                    zoom = 1; lastZoom = 1
+                                    zoomOffset = .zero; lastOffset = .zero
+                                }
+                            }
+                    )
+                    .simultaneousGesture(
+                        DragGesture()
+                            .onChanged { value in
+                                guard zoom > 1 else { return }
+                                zoomOffset = CGSize(width: lastOffset.width + value.translation.width,
+                                                    height: lastOffset.height + value.translation.height)
+                            }
+                            .onEnded { _ in lastOffset = zoomOffset }
+                    )
+                    .onTapGesture(count: 2) {
+                        if zoom > 1 {
+                            zoom = 1; lastZoom = 1
+                            zoomOffset = .zero; lastOffset = .zero
+                        } else {
+                            zoom = 3; lastZoom = 3
+                        }
+                    }
                     .ignoresSafeArea()
             }
             VStack {
@@ -776,6 +813,21 @@ private struct ReviewView: View {
                                 .font(.subheadline.monospacedDigit())
                                 .foregroundStyle(.secondary)
                                 .frame(width: 44, alignment: .trailing)
+                        }
+                    }
+                    if upscaledImage != nil {
+                        Picker("Compare", selection: $showingBefore) {
+                            Text("Before").tag(true)
+                            Text("After").tag(false)
+                        }
+                        .pickerStyle(.segmented)
+                        .onChange(of: showingBefore) { before in
+                            displayed = before ? beforeUpscale : upscaledImage
+                        }
+                        if let up = upscaledImage, let cg = up.cgImage {
+                            Text("Upscaled to \(cg.width) × \(cg.height) — pinch to zoom in and compare.")
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.8))
                         }
                     }
                     if isUpscaling {
@@ -816,7 +868,7 @@ private struct ReviewView: View {
                         .padding(.vertical, 13)
                         .glassCapsule()
                         Button("Save") {
-                            if let displayed { model.save(image: displayed) }
+                            if let img = upscaledImage ?? displayed { model.save(image: img) }
                             model.reviewPhoto = nil
                         }
                         .font(.headline)
@@ -853,6 +905,7 @@ private struct ReviewView: View {
     private func startUpscale() {
         guard let base = displayed, !isUpscaling, !isUpscaled else { return }
         cancelBox.cancelled = false
+        beforeUpscale = base
         isUpscaling = true
         upscaleProgress = 0
         let box = cancelBox
@@ -864,6 +917,10 @@ private struct ReviewView: View {
                     }
                 }.value
                 displayed = out
+                upscaledImage = out
+                showingBefore = false
+                zoom = 1; lastZoom = 1
+                zoomOffset = .zero; lastOffset = .zero
                 isUpscaled = true
             } catch {
                 if (error as? UpscaleError) != .cancelled {
@@ -876,6 +933,11 @@ private struct ReviewView: View {
 
     private func scheduleRegrade(immediate: Bool = false) {
         isUpscaled = false
+        upscaledImage = nil
+        beforeUpscale = nil
+        showingBefore = false
+        zoom = 1; lastZoom = 1
+        zoomOffset = .zero; lastOffset = .zero
         work?.cancel()
         let item = DispatchWorkItem {
             let graded = model.graded(photo.original, strength: strength)
