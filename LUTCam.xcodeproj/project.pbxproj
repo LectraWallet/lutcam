@@ -11,6 +11,10 @@
 		BLDVIEW00000000000000001 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FILVIEW00000000000000001 /* ContentView.swift */; };
 		BLDMODEL0000000000000001 /* CameraModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FILMODEL0000000000000001 /* CameraModel.swift */; };
 		BLDCUBE00000000000000001 /* CubeLUT.swift in Sources */ = {isa = PBXBuildFile; fileRef = FILCUBE00000000000000001 /* CubeLUT.swift */; };
+		BLDUPSCALER000000000001 /* Upscaler.swift in Sources */ = {isa = PBXBuildFile; fileRef = FILUPSCALER000000000001 /* Upscaler.swift */; };
+		BLDMDLMAN00000000000001 /* RealESRGAN-Manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = FILMDLMAN00000000000001 /* RealESRGAN-Manifest.json */; };
+		BLDMDLMOD00000000000001 /* RealESRGAN-model.bindata in Resources */ = {isa = PBXBuildFile; fileRef = FILMDLMOD00000000000001 /* RealESRGAN-model.bindata */; };
+		BLDMDLWGT00000000000001 /* RealESRGAN-weights.bin in Resources */ = {isa = PBXBuildFile; fileRef = FILMDLWGT00000000000001 /* RealESRGAN-weights.bin */; };
 		BLDASSET0000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = FILASSET0000000000000001 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -19,6 +23,10 @@
 		FILVIEW00000000000000001 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		FILMODEL0000000000000001 /* CameraModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraModel.swift; sourceTree = "<group>"; };
 		FILCUBE00000000000000001 /* CubeLUT.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CubeLUT.swift; sourceTree = "<group>"; };
+		FILUPSCALER000000000001 /* Upscaler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Upscaler.swift; sourceTree = "<group>"; };
+		FILMDLMAN00000000000001 /* RealESRGAN-Manifest.json */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.json; path = RealESRGAN-Manifest.json; sourceTree = "<group>"; };
+		FILMDLMOD00000000000001 /* RealESRGAN-model.bindata */ = {isa = PBXFileReference; lastKnownFileType = file; path = RealESRGAN-model.bindata; sourceTree = "<group>"; };
+		FILMDLWGT00000000000001 /* RealESRGAN-weights.bin */ = {isa = PBXFileReference; lastKnownFileType = file; path = RealESRGAN-weights.bin; sourceTree = "<group>"; };
 		FILASSET0000000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		FILPROD00000000000000001 /* LUTCam.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LUTCam.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -49,9 +57,21 @@
 				FILVIEW00000000000000001 /* ContentView.swift */,
 				FILMODEL0000000000000001 /* CameraModel.swift */,
 				FILCUBE00000000000000001 /* CubeLUT.swift */,
+				FILUPSCALER000000000001 /* Upscaler.swift */,
+				GROUPMDL0000000000000001 /* Models */,
 				FILASSET0000000000000001 /* Assets.xcassets */,
 			);
 			path = LUTCam;
+			sourceTree = "<group>";
+		};
+		GROUPMDL0000000000000001 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				FILMDLMAN00000000000001 /* RealESRGAN-Manifest.json */,
+				FILMDLMOD00000000000001 /* RealESRGAN-model.bindata */,
+				FILMDLWGT00000000000001 /* RealESRGAN-weights.bin */,
+			);
+			path = Models;
 			sourceTree = "<group>";
 		};
 		GROUPPRD0000000000000001 /* Products */ = {
@@ -124,6 +144,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				BLDASSET0000000000000001 /* Assets.xcassets in Resources */,
+				BLDMDLMAN00000000000001 /* RealESRGAN-Manifest.json in Resources */,
+				BLDMDLMOD00000000000001 /* RealESRGAN-model.bindata in Resources */,
+				BLDMDLWGT00000000000001 /* RealESRGAN-weights.bin in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -138,6 +161,7 @@
 				BLDVIEW00000000000000001 /* ContentView.swift in Sources */,
 				BLDMODEL0000000000000001 /* CameraModel.swift in Sources */,
 				BLDCUBE00000000000000001 /* CubeLUT.swift in Sources */,
+				BLDUPSCALER000000000001 /* Upscaler.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -152,13 +176,13 @@
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
 				CLANG_ENABLE_MODULES = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_WARN_UNDECLARED_SELECTOR = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 1.1.2;
+				MARKETING_VERSION = 1.2.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -176,13 +200,13 @@
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
 				CLANG_ENABLE_MODULES = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_WARN_UNDECLARED_SELECTOR = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 1.1.2;
+				MARKETING_VERSION = 1.2.0;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
