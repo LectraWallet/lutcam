@@ -1,8 +1,10 @@
 import AVFoundation
 import CoreImage
+import CoreMotion
 import Foundation
 import Photos
 import UIKit
+import Vision
 
 /// One captured photo waiting on the review screen.
 struct CapturedPhoto: Identifiable {
@@ -74,6 +76,14 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var trackAxis: TrackAxis = .all
     @Published var faceRect: CGRect?
 
+    // Point tracking (Vision object tracking on a low-res data output).
+    @Published var trackRect: CGRect?
+
+    // Preview shake stabilization (CoreMotion counter-shift, preview only).
+    @Published var stabilizationEnabled = true
+    @Published var stabOffset: CGSize = .zero
+    @Published var stabRotation: Double = 0
+
     // Set by the preview view so face bounds can be converted to view space.
     weak var previewLayer: AVCaptureVideoPreviewLayer?
 
@@ -85,6 +95,17 @@ final class CameraModel: NSObject, ObservableObject {
     private let photoOutput = AVCapturePhotoOutput()
     private let movieOutput = AVCaptureMovieFileOutput()
     private let metadataOutput = AVCaptureMetadataOutput()
+    private let videoOutput = AVCaptureVideoDataOutput()
+    private let trackingQueue = DispatchQueue(label: "lutcam.tracking", qos: .userInitiated)
+    private var trackRequest: VNTrackObjectRequest?
+    private var trackFrameCounter = 0
+    private var lastTrackRect: CGRect?
+    private var lastPointPublish = Date.distantPast
+    private var motionManager: CMMotionManager?
+    private let motionQueue = OperationQueue()
+    private var stabDX: Double = 0
+    private var stabDY: Double = 0
+    private var stabRot: Double = 0
     private var device: AVCaptureDevice?
     private var activeDelegates: [PhotoCaptureDelegate] = []
     private var observations: [NSKeyValueObservation] = []
@@ -175,13 +196,30 @@ final class CameraModel: NSObject, ObservableObject {
                 }
             }
 
+            // Low-res data output for Vision point tracking. Added at configure
+            // time (never mid-session). Idle-cheap: the delegate returns
+            // immediately unless a track request is active.
+            self.videoOutput.videoSettings = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: 640,
+                kCVPixelBufferHeightKey as String: 360,
+            ]
+            self.videoOutput.alwaysDiscardsLateVideoFrames = true
+            if self.session.canAddOutput(self.videoOutput) {
+                self.session.addOutput(self.videoOutput)
+                self.videoOutput.setSampleBufferDelegate(self, queue: self.trackingQueue)
+            }
+
             self.device = device
             self.session.commitConfiguration()
 
             self.readRanges(from: device)
             self.observe(device: device)
             self.session.startRunning()
-            DispatchQueue.main.async { self.isReady = true }
+            DispatchQueue.main.async {
+                self.isReady = true
+                self.startMotion()
+            }
         }
     }
 
@@ -229,6 +267,7 @@ final class CameraModel: NSObject, ObservableObject {
 
     deinit {
         observations.forEach { $0.invalidate() }
+        motionManager?.stopDeviceMotionUpdates()
     }
 
     // MARK: - Safe device configuration
@@ -569,8 +608,16 @@ final class CameraModel: NSObject, ObservableObject {
     // MARK: - Face tracking
 
     private func trackFace(_ layerRect: CGRect) {
+        // A selected point wins: when point tracking is active, faces are ignored.
+        guard trackRequest == nil else { return }
+        followRect(layerRect)
+    }
+
+    /// Focus-follow shared by faces and the tracked point. `rect` is in
+    /// view-normalized coordinates (origin top-left).
+    private func followRect(_ rect: CGRect) {
         guard faceTracking else { return }
-        let center = CGPoint(x: layerRect.midX, y: layerRect.midY)
+        let center = CGPoint(x: rect.midX, y: rect.midY)
         let deviceCenter = CGPoint(x: center.y, y: 1 - center.x)
         let target: CGPoint
         switch trackAxis {
@@ -589,6 +636,91 @@ final class CameraModel: NSObject, ObservableObject {
         lastTrackPOI = target
         lastTrackUpdate = now
         setFocusPoint(target)
+    }
+
+    // MARK: - Point tracking (tap to select, Vision follows it)
+
+    func toggleTracking() {
+        faceTracking.toggle()
+        if !faceTracking { stopTracking() }
+    }
+
+    /// Start tracking the object at a view-normalized point (origin top-left).
+    func startTracking(at point: CGPoint) {
+        let size: CGFloat = 0.14
+        // Vision coordinates: origin bottom-left, in the upright (portrait) frame.
+        let visionBox = CGRect(
+            x: min(max(point.x - size / 2, 0), 1 - size),
+            y: min(max((1 - point.y) - size / 2, 0), 1 - size),
+            width: size, height: size
+        )
+        let viewBox = CGRect(x: visionBox.minX, y: 1 - visionBox.maxY, width: size, height: size)
+        trackingQueue.async { [weak self] in
+            guard let self else { return }
+            let observation = VNDetectedObjectObservation(boundingBox: visionBox)
+            let request = VNTrackObjectRequest(detectedObjectObservation: observation)
+            request.trackingLevel = .fast
+            self.trackRequest = request
+            self.trackFrameCounter = 0
+            self.lastTrackRect = nil
+        }
+        DispatchQueue.main.async { [weak self] in self?.trackRect = viewBox }
+    }
+
+    func stopTracking() {
+        trackingQueue.async { [weak self] in self?.trackRequest = nil }
+        DispatchQueue.main.async { [weak self] in self?.trackRect = nil }
+    }
+
+    private func trackPoint(_ viewRect: CGRect) {
+        followRect(viewRect)
+    }
+
+    // MARK: - Preview shake stabilization (CoreMotion counter-shift)
+
+    func toggleStabilization() {
+        stabilizationEnabled.toggle()
+        if stabilizationEnabled {
+            startMotion()
+        } else {
+            stopMotion()
+            DispatchQueue.main.async {
+                self.stabOffset = .zero
+                self.stabRotation = 0
+            }
+        }
+    }
+
+    private func startMotion() {
+        guard stabilizationEnabled else { return }
+        let manager = motionManager ?? CMMotionManager()
+        motionManager = manager
+        guard manager.isDeviceMotionAvailable, !manager.isDeviceMotionActive else { return }
+        motionQueue.maxConcurrentOperationCount = 1
+        manager.deviceMotionUpdateInterval = 1.0 / 30.0
+        manager.startDeviceMotionUpdates(to: motionQueue) { [weak self] motion, _ in
+            guard let self, let motion else { return }
+            let dt = 1.0 / 30.0
+            let focal: Double = 350 // points of shift per radian of rotation
+            // Integrate rotation rates with decay: shakes cancel, slow pans recenter.
+            // Signs derived from the device axes (x right, y up, z toward user):
+            // positive yaw/pitch/roll move scene content left/up/counterclockwise,
+            // so the preview shifts right/down/clockwise to compensate.
+            self.stabDX = (self.stabDX + motion.rotationRate.y * dt * focal) * 0.88
+            self.stabDY = (self.stabDY + motion.rotationRate.x * dt * focal) * 0.88
+            self.stabRot = (self.stabRot + motion.rotationRate.z * dt) * 0.88
+            let dx = min(max(self.stabDX, -50), 50)
+            let dy = min(max(self.stabDY, -50), 50)
+            let rot = min(max(self.stabRot, -0.06), 0.06)
+            DispatchQueue.main.async {
+                self.stabOffset = CGSize(width: dx, height: dy)
+                self.stabRotation = rot
+            }
+        }
+    }
+
+    private func stopMotion() {
+        motionManager?.stopDeviceMotionUpdates()
     }
 
     // MARK: - LUT storage
@@ -729,6 +861,46 @@ extension CameraModel: AVCaptureMetadataOutputObjectsDelegate {
             DispatchQueue.main.async { [weak self] in self?.faceRect = normalized }
         }
         trackFace(normalized)
+    }
+}
+
+// MARK: - Video data output delegate (point tracking only)
+
+extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard let request = trackRequest else { return }
+        trackFrameCounter += 1
+        guard trackFrameCounter % 2 == 0 else { return }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        // .right rotates the sensor frame upright (portrait), so the returned
+        // bounding box is in the same upright space as the preview.
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right, options: [:])
+        do {
+            try handler.perform([request])
+        } catch {
+            return
+        }
+        guard let result = request.results?.first as? VNDetectedObjectObservation else {
+            // Tracking lost — clear so the user can re-tap the point.
+            trackRequest = nil
+            DispatchQueue.main.async { [weak self] in self?.trackRect = nil }
+            return
+        }
+        let box = result.boundingBox
+        let viewRect = CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
+        let now = Date()
+        let changed: Bool
+        if let last = lastTrackRect {
+            changed = abs(last.midX - viewRect.midX) + abs(last.midY - viewRect.midY) > 0.005
+        } else {
+            changed = true
+        }
+        if changed || now.timeIntervalSince(lastPointPublish) > 0.5 {
+            lastTrackRect = viewRect
+            lastPointPublish = now
+            DispatchQueue.main.async { [weak self] in self?.trackRect = viewRect }
+        }
+        trackPoint(viewRect)
     }
 }
 
