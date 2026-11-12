@@ -56,7 +56,13 @@ struct LiveCameraView: UIViewRepresentable {
                 connection.videoOrientation = .portrait
             }
             if connection.isVideoStabilizationSupported {
-                connection.preferredVideoStabilizationMode = .auto
+                // Strongest mode for the preview too; the system falls back
+                // to the closest supported mode.
+                if #available(iOS 18.0, *) {
+                    connection.preferredVideoStabilizationMode = .cinematicExtended
+                } else {
+                    connection.preferredVideoStabilizationMode = .cinematic
+                }
             }
         }
     }
@@ -146,7 +152,8 @@ struct ContentView: View {
     private var cameraView: some View {
         GeometryReader { geo in
             ZStack {
-                // Preview + face box scale together for digital zoom (past the lens max).
+                // Preview + tracking boxes scale together for digital zoom (past the lens max),
+                // and shift/rotate slightly to cancel phone shake when stabilization is on.
                 ZStack {
                     LiveCameraView(model: model)
                         .ignoresSafeArea()
@@ -157,10 +164,23 @@ struct ContentView: View {
                             .frame(width: rect.width * geo.size.width, height: rect.height * geo.size.height)
                             .position(x: rect.midX * geo.size.width, y: rect.midY * geo.size.height)
                     }
+
+                    if model.faceTracking, let rect = model.trackRect {
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.white, lineWidth: 2)
+                            .frame(width: rect.width * geo.size.width, height: rect.height * geo.size.height)
+                            .position(x: rect.midX * geo.size.width, y: rect.midY * geo.size.height)
+                    }
                 }
-                .scaleEffect(model.digitalZoomFactor)
+                .scaleEffect(model.digitalZoomFactor * (model.stabilizationEnabled ? 1.06 : 1))
+                .offset(model.stabilizationEnabled ? model.stabOffset : .zero)
+                .rotationEffect(.radians(model.stabilizationEnabled ? model.stabRotation : 0))
                 .onTapGesture { location in
                     let point = CGPoint(x: location.x / geo.size.width, y: location.y / geo.size.height)
+                    if model.faceTracking {
+                        // Tracking on: the tap selects the point to follow.
+                        model.startTracking(at: point)
+                    }
                     model.focusAt(point: point)
                     focusPoint = location
                     withAnimation(.easeOut(duration: 0.15)) { showFocusRing = true }
@@ -299,9 +319,9 @@ struct ContentView: View {
 
     private var controlDeck: some View {
         VStack(spacing: 14) {
-            // Face tracking + axis lock
+            // Tracking + axis lock + shake stabilization
             HStack(spacing: 8) {
-                Button { model.faceTracking.toggle() } label: {
+                Button { model.toggleTracking() } label: {
                     HStack(spacing: 5) {
                         Image(systemName: model.faceTracking ? "viewfinder.circle.fill" : "viewfinder.circle")
                         Text("Track")
@@ -312,6 +332,15 @@ struct ContentView: View {
                     .padding(.vertical, 7)
                     .background(model.faceTracking ? .white : .clear, in: Capsule())
                     .overlay(Capsule().stroke(.white.opacity(0.4), lineWidth: 1))
+                }
+                Button { model.toggleStabilization() } label: {
+                    Text("Stab")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(model.stabilizationEnabled ? .black : .white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(model.stabilizationEnabled ? .white : .clear, in: Capsule())
+                        .overlay(Capsule().stroke(.white.opacity(0.4), lineWidth: 1))
                 }
                 if model.faceTracking {
                     ForEach(TrackAxis.allCases, id: \.self) { axis in
