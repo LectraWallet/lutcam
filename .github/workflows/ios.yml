@@ -31,6 +31,21 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO
 
+      - name: Compile CoreML model
+        run: |
+          set -e
+          APP=$(find build/Build/Products -maxdepth 2 -name "*.app" -type d | head -n 1)
+          if [ -z "$APP" ]; then echo "NO .app FOUND"; exit 1; fi
+          echo "App: $APP"
+          PKG="$RUNNER_TEMP/RealESRGAN.mlpackage"
+          rm -rf "$PKG"
+          mkdir -p "$PKG/Data/com.apple.CoreML/weights"
+          cp LUTCam/Models/RealESRGAN-Manifest.json "$PKG/Manifest.json"
+          cp LUTCam/Models/RealESRGAN-model.bindata "$PKG/Data/com.apple.CoreML/model.mlmodel"
+          cp LUTCam/Models/RealESRGAN-weights.bin "$PKG/Data/com.apple.CoreML/weights/weight.bin"
+          xcrun coremlc compile "$PKG" "$APP"
+          ls -la "$APP/RealESRGAN.mlmodelc"
+
       - name: Package IPA
         run: |
           echo "--- products tree ---"
@@ -52,6 +67,6 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.2.0
-          name: LUT Cam v1.2.0
+          tag_name: v1.3.0
+          name: LUT Cam v1.3.0
           files: LUTCam-unsigned.ipa
