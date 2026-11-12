@@ -146,8 +146,8 @@ final class CameraModel: NSObject, ObservableObject {
                 guard s.isFinite, s > 0 else { return }
                 DispatchQueue.main.async { self?.liveShutter = s }
             },
-            device.observe(\.whiteBalanceGains, options: [.new]) { [weak self] d, _ in
-                let t = d.temperatureAndTintValues(for: d.whiteBalanceGains)
+            device.observe(\.deviceWhiteBalanceGains, options: [.new]) { [weak self] d, _ in
+                let t = d.temperatureAndTintValues(for: d.deviceWhiteBalanceGains)
                 DispatchQueue.main.async { self?.liveWB = t.temperature }
             },
             device.observe(\.lensPosition, options: [.new]) { [weak self] d, _ in
@@ -219,7 +219,6 @@ final class CameraModel: NSObject, ObservableObject {
         exposureBias = ev
         sessionQueue.async { [weak self] in
             self?.withDevice { device in
-                guard device.isExposureTargetBiasSupported else { return }
                 let clamped = min(max(ev, device.minExposureTargetBias), device.maxExposureTargetBias)
                 device.setExposureTargetBias(clamped, completionHandler: nil)
             }
@@ -260,11 +259,7 @@ final class CameraModel: NSObject, ObservableObject {
         gains.redGain = min(max(gains.redGain, 1), maxGain)
         gains.greenGain = min(max(gains.greenGain, 1), maxGain)
         gains.blueGain = min(max(gains.blueGain, 1), maxGain)
-        do {
-            try device.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
-        } catch {
-            // Unsupported gain combination — leave white balance as-is.
-        }
+        device.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
     }
 
     // MARK: - Focus
