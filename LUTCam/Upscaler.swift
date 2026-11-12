@@ -1,3 +1,4 @@
+import CoreImage
 import CoreML
 import UIKit
 
@@ -24,6 +25,10 @@ enum UpscaleError: LocalizedError, Equatable {
 /// On-device 4x AI upscaler: Real-ESRGAN general-x4v3, converted to CoreML,
 /// running on the Neural Engine. No server, no key, works offline.
 ///
+/// Pipeline: de-grain (noise reduction) -> AI 4x upscale -> de-blur
+/// (unsharp mask). The model alone preserves grain and softness, so the
+/// filters do the cleanup the model doesn't.
+///
 /// The model takes fixed 256x256 tiles, so photos are split with overlap and
 /// stitched back together. Input is capped at 2048px on the longest side:
 /// 4x of a full 12MP photo would need a ~780MB output buffer.
@@ -38,6 +43,7 @@ final class Upscaler {
 
     private var model: MLModel?
     private let lock = NSLock()
+    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
     private init() {}
 
@@ -111,8 +117,9 @@ final class Upscaler {
         guard let cg = normalizedCGImage(image) else { throw UpscaleError.imageFailed }
 
         let capped = cappedCGImage(cg, maxSide: maxInputSide)
-        let w = capped.width, h = capped.height
-        guard let src = readRGBA(capped) else { throw UpscaleError.imageFailed }
+        let cleaned = denoise(capped)
+        let w = cleaned.width, h = cleaned.height
+        guard let src = readRGBA(cleaned) else { throw UpscaleError.imageFailed }
 
         let outW = w * scale, outH = h * scale
         guard let outCtx = CGContext(data: nil, width: outW, height: outH, bitsPerComponent: 8,
@@ -145,7 +152,35 @@ final class Upscaler {
             }
         }
         guard let outImage = outCtx.makeImage() else { throw UpscaleError.imageFailed }
-        return UIImage(cgImage: outImage)
+        return UIImage(cgImage: sharpen(outImage))
+    }
+
+    // MARK: - De-grain / de-blur
+
+    /// Kills sensor grain before the model sees the photo, so the upscaler
+    /// doesn't preserve or amplify it. Returns the input unchanged on failure.
+    private func denoise(_ cg: CGImage) -> CGImage {
+        let input = CIImage(cgImage: cg)
+        guard let filter = CIFilter(name: "CINoiseReduction") else { return cg }
+        filter.setValue(input, forKey: kCIInputImageKey)
+        filter.setValue(0.06, forKey: "inputNoiseLevel")
+        filter.setValue(0.6, forKey: "inputSharpness")
+        guard let out = filter.outputImage,
+              let rendered = ciContext.createCGImage(out, from: input.extent) else { return cg }
+        return rendered
+    }
+
+    /// Restores edge crispness on the upscaled result. Returns the input
+    /// unchanged on failure.
+    private func sharpen(_ cg: CGImage) -> CGImage {
+        let input = CIImage(cgImage: cg)
+        guard let filter = CIFilter(name: "CIUnsharpMask") else { return cg }
+        filter.setValue(input, forKey: kCIInputImageKey)
+        filter.setValue(5.0, forKey: "inputRadius")
+        filter.setValue(0.6, forKey: "inputIntensity")
+        guard let out = filter.outputImage,
+              let rendered = ciContext.createCGImage(out, from: input.extent) else { return cg }
+        return rendered
     }
 
     // MARK: - Image helpers
