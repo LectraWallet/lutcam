@@ -1,0 +1,271 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		BLDAPP000000000000000001 /* LUTCamApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = FILAPP000000000000000001 /* LUTCamApp.swift */; };
+		BLDVIEW00000000000000001 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FILVIEW00000000000000001 /* ContentView.swift */; };
+		BLDMODEL0000000000000001 /* CameraModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FILMODEL0000000000000001 /* CameraModel.swift */; };
+		BLDCUBE00000000000000001 /* CubeLUT.swift in Sources */ = {isa = PBXBuildFile; fileRef = FILCUBE00000000000000001 /* CubeLUT.swift */; };
+		BLDASSET0000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = FILASSET0000000000000001 /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		FILAPP000000000000000001 /* LUTCamApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LUTCamApp.swift; sourceTree = "<group>"; };
+		FILVIEW00000000000000001 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		FILMODEL0000000000000001 /* CameraModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraModel.swift; sourceTree = "<group>"; };
+		FILCUBE00000000000000001 /* CubeLUT.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CubeLUT.swift; sourceTree = "<group>"; };
+		FILASSET0000000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		FILPROD00000000000000001 /* LUTCam.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LUTCam.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		FRAMEWRK0000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		GROUPMAI0000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				GROUPSRC0000000000000001 /* LUTCam */,
+				GROUPPRD0000000000000001 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		GROUPSRC0000000000000001 /* LUTCam */ = {
+			isa = PBXGroup;
+			children = (
+				FILAPP000000000000000001 /* LUTCamApp.swift */,
+				FILVIEW00000000000000001 /* ContentView.swift */,
+				FILMODEL0000000000000001 /* CameraModel.swift */,
+				FILCUBE00000000000000001 /* CubeLUT.swift */,
+				FILASSET0000000000000001 /* Assets.xcassets */,
+			);
+			path = LUTCam;
+			sourceTree = "<group>";
+		};
+		GROUPPRD0000000000000001 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				FILPROD00000000000000001 /* LUTCam.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		TARGETAP0000000000000001 /* LUTCam */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = TARGCFG00000000000000001 /* Build configuration list for PBXNativeTarget "LUTCam" */;
+			buildPhases = (
+				SOURCEPH0000000000000001 /* Sources */,
+				FRAMEWRK0000000000000001 /* Frameworks */,
+				RESOURCP0000000000000001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = LUTCam;
+			packageProductDependencies = (
+			);
+			productName = LUTCam;
+			productReference = FILPROD00000000000000001 /* LUTCam.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		ROOTPROJ0000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastUpgradeCheck = 1620;
+				TargetAttributes = {
+					TARGETAP0000000000000001 = {
+						CreatedOnToolsVersion = 16.2;
+					};
+				};
+			};
+			buildConfigurationList = PROJCFG00000000000000001 /* Build configuration list for PBXProject "LUTCam" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = GROUPMAI0000000000000001;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = GROUPPRD0000000000000001 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				TARGETAP0000000000000001 /* LUTCam */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		RESOURCP0000000000000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BLDASSET0000000000000001 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		SOURCEPH0000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BLDAPP000000000000000001 /* LUTCamApp.swift in Sources */,
+				BLDVIEW00000000000000001 /* ContentView.swift in Sources */,
+				BLDMODEL0000000000000001 /* CameraModel.swift in Sources */,
+				BLDCUBE00000000000000001 /* CubeLUT.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		CFGPRJDBG000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		CFGPRJREL000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		CFGTSTDBG000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				INFOPLIST_KEY_NSCameraUsageDescription = "LUT Cam needs camera access to take photos.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "LUT Cam saves your photos to your library.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.lutcam.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		CFGTSTREL000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				INFOPLIST_KEY_NSCameraUsageDescription = "LUT Cam needs camera access to take photos.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "LUT Cam saves your photos to your library.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.lutcam.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		PROJCFG00000000000000001 /* Build configuration list for PBXProject "LUTCam" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CFGPRJDBG000000000000001 /* Debug */,
+				CFGPRJREL000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		TARGCFG00000000000000001 /* Build configuration list for PBXNativeTarget "LUTCam" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CFGTSTDBG000000000000001 /* Debug */,
+				CFGTSTREL000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = ROOTPROJ0000000000000001 /* Project object */;
+}
