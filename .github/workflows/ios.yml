@@ -22,6 +22,7 @@ jobs:
 
       - name: Build (unsigned)
         run: |
+          set -o pipefail
           xcodebuild -project LUTCam.xcodeproj \
             -scheme LUTCam \
             -configuration Release \
@@ -31,7 +32,17 @@ jobs:
             CODE_SIGN_STYLE=Manual \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            DEVELOPMENT_TEAM=""
+            DEVELOPMENT_TEAM="" 2>&1 | tee build.log
+
+      - name: Save build log on failure
+        if: failure()
+        run: |
+          git config user.name "lutcam-ci"
+          git config user.email "ci@lutcam.local"
+          { grep -E "error:|BUILD FAILED" build.log | head -40; echo "--- tail ---"; tail -30 build.log; } > build-error.txt
+          git add build-error.txt
+          git commit -m "ci: build error log" || exit 0
+          git push origin HEAD:main
 
       - name: Compile CoreML model
         run: |
