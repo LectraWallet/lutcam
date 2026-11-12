@@ -7,6 +7,7 @@ on:
     paths:
       - 'LUTCam/**'
       - 'LUTCam.xcodeproj/**'
+      - '.github/workflows/**'
 
 jobs:
   build:
@@ -32,8 +33,13 @@ jobs:
 
       - name: Package IPA
         run: |
+          echo "--- products tree ---"
+          find build/Build/Products -maxdepth 2 | head -50
+          APP=$(find build/Build/Products -maxdepth 2 -name "*.app" -type d | head -n 1)
+          if [ -z "$APP" ]; then echo "NO .app FOUND UNDER build/Build/Products"; exit 1; fi
+          echo "Found app bundle: $APP"
           mkdir -p Payload
-          cp -r "build/Build/Products/Release-iphoneos/LUTCam.app" Payload/
+          cp -r "$APP" Payload/
           zip -r LUTCam-unsigned.ipa Payload
           ls -lh LUTCam-unsigned.ipa
 
