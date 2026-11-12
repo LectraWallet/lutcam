@@ -255,7 +255,7 @@ final class CameraModel: NSObject, ObservableObject {
         guard device.isWhiteBalanceModeSupported(.locked) else { return }
         let kelvin = min(max(manualWB, wbRange.lowerBound), wbRange.upperBound)
         let values = AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(temperature: kelvin, tint: 0)
-        var gains = device.deviceGainForTemperatureAndTintValues(values)
+        var gains = device.deviceWhiteBalanceGains(for: values)
         let maxGain = device.maxWhiteBalanceGain
         gains.redGain = min(max(gains.redGain, 1), maxGain)
         gains.greenGain = min(max(gains.greenGain, 1), maxGain)
