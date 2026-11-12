@@ -1,6 +1,14 @@
 import CoreImage
 import UIKit
 
+/// A .cube file found on disk. Lightweight — the file is only parsed when
+/// selected, so hundreds of LUTs never block launch.
+struct LUTEntry: Identifiable, Equatable {
+    let id = UUID()
+    let name: String
+    let url: URL
+}
+
 /// A parsed .cube 3D LUT. Cube data is stored as RGBA floats, size^3 entries,
 /// plus a prebuilt Data blob so live grading never copies the array per frame.
 struct LoadedLUT: Identifiable, Equatable {
