@@ -116,6 +116,9 @@ final class CameraModel: NSObject, ObservableObject {
     private var stabRot: Double = 0
     private let lutQueue = DispatchQueue(label: "lutcam.luts", qos: .utility)
     private var selectToken = UUID()
+    /// True once a LUT preset has changed the camera settings, so
+    /// deselecting the LUT can put everything back to auto.
+    private var presetApplied = false
     private var faceAnchor: CGRect?
     private var pointAnchor: CGRect?
     private var trackMisses = 0
@@ -469,6 +472,14 @@ final class CameraModel: NSObject, ObservableObject {
             selectedLUT = nil
             lutError = nil
             loadingLUT = nil
+            // Undo what the preset changed so the camera goes back to
+            // normal instead of staying stuck on the LUT's locked settings.
+            if presetApplied {
+                presetApplied = false
+                setExposureAuto(true)
+                setWBAuto(true)
+                setExposureBias(0)
+            }
             return
         }
         // Ignore re-taps while this exact LUT is still parsing: every tap
@@ -513,18 +524,25 @@ final class CameraModel: NSObject, ObservableObject {
     /// matches the guide instead of the camera fighting it. ISO + shutter
     /// lock together on iOS, so when the preset names only one, the other
     /// locks at its current live value.
+    /// The presets were measured in DAYLIGHT. In a dark scene (high live
+    /// ISO) locking ISO 100 + 1/500 + 5500K crushes the image and tints it
+    /// blue, so there only strength + EV apply and the autos stay on.
     private func applyPreset(_ preset: LUTPreset) {
         lutStrength = preset.intensity
-        if preset.iso != nil || preset.shutter != nil {
-            manualISO = preset.iso ?? (liveISO > 0 ? liveISO : manualISO)
-            manualShutter = preset.shutter ?? (liveShutter > 0 ? liveShutter : manualShutter)
-            setExposureAuto(false)
-        }
-        if let kelvin = preset.kelvin {
-            manualWB = kelvin
-            setWBAuto(false)
+        let darkScene = liveISO > 200
+        if !darkScene {
+            if preset.iso != nil || preset.shutter != nil {
+                manualISO = preset.iso ?? (liveISO > 0 ? liveISO : manualISO)
+                manualShutter = preset.shutter ?? (liveShutter > 0 ? liveShutter : manualShutter)
+                setExposureAuto(false)
+            }
+            if let kelvin = preset.kelvin {
+                manualWB = kelvin
+                setWBAuto(false)
+            }
         }
         setExposureBias(preset.ev)
+        presetApplied = true
     }
 
     // MARK: - Photo capture
