@@ -1,4 +1,7 @@
 import AVFoundation
+import CoreImage
+import CoreVideo
+import Metal
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -65,6 +68,95 @@ struct LiveCameraView: UIViewRepresentable {
                 }
             }
         }
+    }
+}
+
+// MARK: - Live LUT preview (Metal — graded frames render straight to the
+// screen with no CPU readback, so the preview holds full frame rate)
+
+final class LiveLUTMetalView: UIView {
+    override class var layerClass: AnyClass { CAMetalLayer.self }
+    private var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
+
+    private let mtlDevice: MTLDevice?
+    private let commandQueue: MTLCommandQueue?
+    private let ciContext: CIContext?
+    private let colorSpace = CGColorSpaceCreateDeviceRGB()
+    private let renderLock = NSLock()
+    private var rendering = false
+
+    override init(frame: CGRect) {
+        mtlDevice = MTLCreateSystemDefaultDevice()
+        commandQueue = mtlDevice?.makeCommandQueue()
+        ciContext = mtlDevice.map { CIContext(mtlDevice: $0, options: [.cacheIntermediates: false]) }
+        super.init(frame: frame)
+        metalLayer.device = mtlDevice
+        metalLayer.pixelFormat = .bgra8Unorm
+        metalLayer.framebufferOnly = true
+        backgroundColor = .clear
+        isOpaque = false
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        metalLayer.drawableSize = CGSize(width: bounds.width * contentScaleFactor,
+                                         height: bounds.height * contentScaleFactor)
+    }
+
+    /// Called from the capture queue for every frame while a LUT is selected.
+    /// Skips frames while a render is still in flight instead of queueing up.
+    func renderFrame(pixelBuffer: CVPixelBuffer, lut: LoadedLUT, strength: Float) {
+        guard let ciContext, let commandQueue else { return }
+        renderLock.lock()
+        if rendering { renderLock.unlock(); return }
+        rendering = true
+        renderLock.unlock()
+
+        let done: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.renderLock.lock()
+            self.rendering = false
+            self.renderLock.unlock()
+        }
+        guard let drawable = metalLayer.nextDrawable() else { done(); return }
+        let dw = CGFloat(drawable.texture.width)
+        let dh = CGFloat(drawable.texture.height)
+        guard dw > 0, dh > 0 else { done(); return }
+        // .right rotates the sensor frame upright (portrait), same as the
+        // tracking path, so the graded frame lines up with the preview layer.
+        let ci = CIImage(cvPixelBuffer: pixelBuffer).oriented(.right)
+        let graded = CubeLUT.grade(ci, lut: lut, strength: strength)
+        let extent = graded.extent
+        guard extent.width > 0, extent.height > 0 else { done(); return }
+        // Aspect-fill the drawable, centered.
+        let scale = max(dw / extent.width, dh / extent.height)
+        let scaled = graded.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let tx = (dw - scaled.extent.width) / 2 - scaled.extent.minX
+        let ty = (dh - scaled.extent.height) / 2 - scaled.extent.minY
+        let placed = scaled.transformed(by: CGAffineTransform(translationX: tx, y: ty))
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { done(); return }
+        ciContext.render(placed, to: drawable.texture, commandBuffer: commandBuffer,
+                         bounds: CGRect(x: 0, y: 0, width: dw, height: dh), colorSpace: colorSpace)
+        commandBuffer.present(drawable)
+        commandBuffer.addCompletedHandler { _ in done() }
+        commandBuffer.commit()
+    }
+}
+
+struct LiveLUTMetalRepresentable: UIViewRepresentable {
+    @ObservedObject var model: CameraModel
+
+    func makeUIView(context: Context) -> LiveLUTMetalView {
+        let view = LiveLUTMetalView()
+        model.liveLUTView = view
+        return view
+    }
+
+    func updateUIView(_ view: LiveLUTMetalView, context: Context) {
+        view.isHidden = (model.selectedLUT == nil)
+        model.liveLUTView = view
     }
 }
 
@@ -159,16 +251,12 @@ struct ContentView: View {
                     LiveCameraView(model: model)
                         .ignoresSafeArea()
 
-                    // Live LUT preview: the graded low-res frame covers the
-                    // preview layer exactly while a LUT is selected, so
-                    // swapping LUTs changes what you see immediately.
-                    if let live = model.liveFrame {
-                        Image(uiImage: live)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: geo.size.width, height: geo.size.height)
-                            .allowsHitTesting(false)
-                    }
+                    // Live LUT preview: graded frames render straight into
+                    // this Metal view while a LUT is selected, so swapping
+                    // LUTs changes what you see immediately at full fps.
+                    LiveLUTMetalRepresentable(model: model)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .allowsHitTesting(false)
 
                     if model.faceTracking, let rect = model.faceRect {
                         RoundedRectangle(cornerRadius: 10)
@@ -682,7 +770,14 @@ struct ContentView: View {
                             model.selectLUT(lut)
                         } label: {
                             HStack {
-                                Text(lut.name).foregroundStyle(.white)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(lut.name).foregroundStyle(.white)
+                                    if let preset = LUTPresets.preset(for: lut.name) {
+                                        Text(preset.summary)
+                                            .font(.caption)
+                                            .foregroundStyle(.white.opacity(0.6))
+                                    }
+                                }
                                 Spacer()
                                 if model.loadingLUT == lut.name {
                                     ProgressView().tint(.white)
