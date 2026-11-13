@@ -70,6 +70,10 @@ final class CameraModel: NSObject, ObservableObject {
     /// Name of the LUT currently being parsed (big cubes take seconds).
     /// Shown as a spinner on the chip/row so taps never look dead.
     @Published var loadingLUT: String?
+    /// Latest LUT-graded live frame, published ~15fps while a LUT is
+    /// selected. The view overlays it on the preview layer so swapping
+    /// LUTs changes what you see immediately. Nil with no LUT selected.
+    @Published var liveFrame: UIImage?
 
     // Recording
     @Published var isRecording = false
@@ -103,6 +107,7 @@ final class CameraModel: NSObject, ObservableObject {
     private let trackingQueue = DispatchQueue(label: "lutcam.tracking", qos: .userInitiated)
     private var trackRequest: VNTrackObjectRequest?
     private var trackFrameCounter = 0
+    private var lastLiveFrameTime: CFAbsoluteTime = 0
     private var lastTrackRect: CGRect?
     private var lastPointPublish = Date.distantPast
     private var motionManager: CMMotionManager?
@@ -205,9 +210,10 @@ final class CameraModel: NSObject, ObservableObject {
                 }
             }
 
-            // Low-res data output for Vision point tracking. Added at configure
-            // time (never mid-session). Idle-cheap: the delegate returns
-            // immediately unless a track request is active.
+            // Low-res data output for Vision point tracking + the live
+            // LUT-graded preview overlay. Added at configure time (never
+            // mid-session). Idle-cheap: the delegate returns immediately
+            // unless a track request is active or a LUT is selected.
             self.videoOutput.videoSettings = [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
                 kCVPixelBufferWidthKey as String: 640,
@@ -464,6 +470,7 @@ final class CameraModel: NSObject, ObservableObject {
             selectedLUT = nil
             lutError = nil
             loadingLUT = nil
+            liveFrame = nil
             return
         }
         // Ignore re-taps while this exact LUT is still parsing: every tap
@@ -935,6 +942,7 @@ extension CameraModel: AVCaptureMetadataOutputObjectsDelegate {
 
 extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        publishLiveFrameIfNeeded(sampleBuffer)
         guard let request = trackRequest else { return }
         trackFrameCounter += 1
         guard trackFrameCounter % 2 == 0 else { return }
@@ -974,6 +982,25 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
             DispatchQueue.main.async { [weak self] in self?.trackRect = viewRect }
         }
         trackPoint(viewRect)
+    }
+
+    /// Grades the live low-res frame with the selected LUT and publishes it
+    /// (~15fps) for the preview overlay. No-ops with no LUT selected, so
+    /// the ungraded preview costs nothing. Runs on trackingQueue; only the
+    /// @Published assignment hops to main.
+    private func publishLiveFrameIfNeeded(_ sampleBuffer: CMSampleBuffer) {
+        guard let lut = selectedLUT else { return }
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastLiveFrameTime >= 1.0 / 15.0 else { return }
+        lastLiveFrameTime = now
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        // .right rotates the sensor frame upright (portrait), same as the
+        // tracking path, so the overlay lines up with the preview layer.
+        let ci = CIImage(cvPixelBuffer: pixelBuffer).oriented(.right)
+        let graded = CubeLUT.grade(ci, lut: lut, strength: lutStrength)
+        guard let cg = ciContext.createCGImage(graded, from: graded.extent) else { return }
+        let image = UIImage(cgImage: cg)
+        DispatchQueue.main.async { [weak self] in self?.liveFrame = image }
     }
 }
 
