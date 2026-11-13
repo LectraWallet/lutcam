@@ -85,6 +85,6 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.5.6
+          tag_name: v1.6.0
           name: LUT Cam v1.5.2
           files: LUTCam-unsigned.ipa
