@@ -159,6 +159,17 @@ struct ContentView: View {
                     LiveCameraView(model: model)
                         .ignoresSafeArea()
 
+                    // Live LUT preview: the graded low-res frame covers the
+                    // preview layer exactly while a LUT is selected, so
+                    // swapping LUTs changes what you see immediately.
+                    if let live = model.liveFrame {
+                        Image(uiImage: live)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: geo.size.width, height: geo.size.height)
+                            .allowsHitTesting(false)
+                    }
+
                     if model.faceTracking, let rect = model.faceRect {
                         RoundedRectangle(cornerRadius: 10)
                             .stroke(Color.green, lineWidth: 2)
