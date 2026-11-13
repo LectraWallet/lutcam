@@ -67,6 +67,9 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var selectedLUT: LoadedLUT?
     @Published var lutStrength: Float = 0.7
     @Published var lutError: String?
+    /// Name of the LUT currently being parsed (big cubes take seconds).
+    /// Shown as a spinner on the chip/row so taps never look dead.
+    @Published var loadingLUT: String?
 
     // Recording
     @Published var isRecording = false
@@ -460,10 +463,16 @@ final class CameraModel: NSObject, ObservableObject {
             selectToken = UUID()
             selectedLUT = nil
             lutError = nil
+            loadingLUT = nil
             return
         }
+        // Ignore re-taps while this exact LUT is still parsing: every tap
+        // mints a new token and discards the in-flight parse, so impatient
+        // tapping on a big cube could starve it forever.
+        if loadingLUT == entry.name { return }
         let token = UUID()
         selectToken = token
+        loadingLUT = entry.name
         lutQueue.async { [weak self] in
             guard let self else { return }
             do {
@@ -472,12 +481,14 @@ final class CameraModel: NSObject, ObservableObject {
                     guard self.selectToken == token else { return }
                     self.selectedLUT = lut
                     self.lutError = nil
+                    self.loadingLUT = nil
                 }
             } catch {
                 DispatchQueue.main.async {
                     guard self.selectToken == token else { return }
                     let reason = (error as? CubeError)?.reason ?? "unknown format"
                     self.lutError = "That .cube file could not be read (\(reason))."
+                    self.loadingLUT = nil
                 }
             }
         }
@@ -772,12 +783,14 @@ final class CameraModel: NSObject, ObservableObject {
             let rx = abs(motion.rotationRate.x) < 0.02 ? 0 : motion.rotationRate.x
             let rz = abs(motion.rotationRate.z) < 0.02 ? 0 : motion.rotationRate.z
             // Integrate rotation rates with decay: shakes cancel, slow pans recenter.
-            // Signs: panning right is NEGATIVE yaw and slides content LEFT, so the
+            // Yaw: panning right is NEGATIVE yaw and slides content LEFT, so the
             // preview shifts RIGHT (+x) — the offset opposes the rotation rate.
-            // Same opposition for pitch (content slides down, preview shifts up)
-            // and roll (content twists counterclockwise, preview twists clockwise).
+            // Pitch: on-device report (v1.5.3) was side-to-side good but
+            // up/down amplified with the yaw rule applied to pitch, so the
+            // pitch sign is flipped here (v1.5.4) — the on-device verdict
+            // on this build decides whether this sign is the right one.
             self.stabDX = (self.stabDX - ry * dt * focal) * 0.88
-            self.stabDY = (self.stabDY - rx * dt * focal) * 0.88
+            self.stabDY = (self.stabDY + rx * dt * focal) * 0.88
             self.stabRot = (self.stabRot - rz * dt) * 0.88
             let dx = min(max(self.stabDX, -50), 50)
             let dy = min(max(self.stabDY, -50), 50)
