@@ -70,7 +70,7 @@ final class CameraModel: NSObject, ObservableObject {
     /// Name of the LUT currently being parsed (big cubes take seconds).
     /// Shown as a spinner on the chip/row so taps never look dead.
     @Published var loadingLUT: String?
-    /// Latest LUT-graded live frame, published ~15fps while a LUT is
+    /// Latest LUT-graded live frame, published ~30fps while a LUT is
     /// selected. The view overlays it on the preview layer so swapping
     /// LUTs changes what you see immediately. Nil with no LUT selected.
     @Published var liveFrame: UIImage?
@@ -216,8 +216,8 @@ final class CameraModel: NSObject, ObservableObject {
             // unless a track request is active or a LUT is selected.
             self.videoOutput.videoSettings = [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-                kCVPixelBufferWidthKey as String: 640,
-                kCVPixelBufferHeightKey as String: 360,
+                kCVPixelBufferWidthKey as String: 480,
+                kCVPixelBufferHeightKey as String: 270,
             ]
             self.videoOutput.alwaysDiscardsLateVideoFrames = true
             if self.session.canAddOutput(self.videoOutput) {
@@ -985,13 +985,14 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
     }
 
     /// Grades the live low-res frame with the selected LUT and publishes it
-    /// (~15fps) for the preview overlay. No-ops with no LUT selected, so
-    /// the ungraded preview costs nothing. Runs on trackingQueue; only the
-    /// @Published assignment hops to main.
+    /// (every frame, ~30fps) for the preview overlay. The feed is 480x270
+    /// so each grade + render stays cheap enough to hold full frame rate.
+    /// No-ops with no LUT selected, so the ungraded preview costs nothing.
+    /// Runs on trackingQueue; only the @Published assignment hops to main.
     private func publishLiveFrameIfNeeded(_ sampleBuffer: CMSampleBuffer) {
         guard let lut = selectedLUT else { return }
         let now = CFAbsoluteTimeGetCurrent()
-        guard now - lastLiveFrameTime >= 1.0 / 15.0 else { return }
+        guard now - lastLiveFrameTime >= 1.0 / 30.0 else { return }
         lastLiveFrameTime = now
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         // .right rotates the sensor frame upright (portrait), same as the
