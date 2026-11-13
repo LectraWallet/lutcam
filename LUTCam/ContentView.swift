@@ -92,6 +92,7 @@ struct ContentView: View {
     @State private var focusPoint: CGPoint?
     @State private var showFocusRing = false
     @State private var pinchBase: CGFloat?
+    @State private var lutScrub: Double = 0
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -172,7 +173,7 @@ struct ContentView: View {
                             .position(x: rect.midX * geo.size.width, y: rect.midY * geo.size.height)
                     }
                 }
-                .scaleEffect(model.digitalZoomFactor * (model.stabilizationEnabled ? 1.06 : 1))
+                .scaleEffect(model.digitalZoomFactor * (model.stabilizationEnabled ? 1.10 : 1))
                 .offset(model.stabilizationEnabled ? model.stabOffset : .zero)
                 .rotationEffect(.radians(model.stabilizationEnabled ? model.stabRotation : 0))
                 .onTapGesture { location in
@@ -277,42 +278,72 @@ struct ContentView: View {
     // MARK: - LUT hot-swap strip
 
     private var lutStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                lutChip(title: "None", selected: model.selectedLUT == nil) {
-                    model.selectLUT(nil)
-                }
-                ForEach(model.luts) { lut in
-                    lutChip(title: lut.name, selected: model.selectedLUT?.name == lut.name) {
-                        model.selectLUT(lut)
+        ScrollViewReader { proxy in
+            VStack(spacing: 6) {
+                ScrollView(.horizontal, showsIndicators: true) {
+                    HStack(spacing: 8) {
+                        lutChip(title: "None", selected: model.selectedLUT == nil, loading: false) {
+                            model.selectLUT(nil)
+                        }
+                        ForEach(model.luts) { lut in
+                            lutChip(title: lut.name, selected: model.selectedLUT?.name == lut.name, loading: model.loadingLUT == lut.name) {
+                                model.selectLUT(lut)
+                            }
+                            .id(lut.id)
+                        }
+                        Button { showLUTs = true } label: {
+                            Image(systemName: "plus")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .glassCapsule()
+                        }
                     }
+                    .padding(.horizontal, 2)
+                    .padding(.vertical, 2)
                 }
-                Button { showLUTs = true } label: {
-                    Image(systemName: "plus")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .glassCapsule()
+                // With a lot of LUTs, a slider scrubs the strip so any LUT
+                // is one drag away instead of a long swipe.
+                if model.luts.count > 12 {
+                    HStack(spacing: 8) {
+                        Slider(value: $lutScrub, in: 0...Double(model.luts.count - 1), step: 1)
+                            .tint(.white)
+                            .onChange(of: lutScrub) { value in
+                                let idx = min(max(Int(value), 0), model.luts.count - 1)
+                                withAnimation { proxy.scrollTo(model.luts[idx].id, anchor: .center) }
+                            }
+                        Text("\(min(Int(lutScrub) + 1, model.luts.count))/\(model.luts.count)")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.white.opacity(0.7))
+                            .frame(width: 52, alignment: .trailing)
+                    }
+                    .padding(.horizontal, 2)
                 }
             }
-            .padding(.horizontal, 2)
-            .padding(.vertical, 2)
         }
         .padding(.bottom, 8)
     }
 
-    private func lutChip(title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+    private func lutChip(title: String, selected: Bool, loading: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
-                .foregroundStyle(selected ? .black : .white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(selected ? .white : .clear, in: Capsule())
-                .overlay(Capsule().stroke(.white.opacity(0.25), lineWidth: 0.5))
+            HStack(spacing: 6) {
+                if loading {
+                    ProgressView()
+                        .tint(selected ? .black : .white)
+                        .scaleEffect(0.7)
+                }
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                    .foregroundStyle(selected ? .black : .white)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(selected ? .white : .clear, in: Capsule())
+            .overlay(Capsule().stroke(.white.opacity(0.25), lineWidth: 0.5))
         }
+        .disabled(loading)
     }
 
     // MARK: - Control deck
@@ -642,7 +673,9 @@ struct ContentView: View {
                             HStack {
                                 Text(lut.name).foregroundStyle(.white)
                                 Spacer()
-                                if model.selectedLUT?.name == lut.name {
+                                if model.loadingLUT == lut.name {
+                                    ProgressView().tint(.white)
+                                } else if model.selectedLUT?.name == lut.name {
                                     Image(systemName: "checkmark").foregroundStyle(.white)
                                 }
                             }
