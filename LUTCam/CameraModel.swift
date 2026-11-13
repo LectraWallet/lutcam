@@ -70,10 +70,10 @@ final class CameraModel: NSObject, ObservableObject {
     /// Name of the LUT currently being parsed (big cubes take seconds).
     /// Shown as a spinner on the chip/row so taps never look dead.
     @Published var loadingLUT: String?
-    /// Latest LUT-graded live frame, published ~30fps while a LUT is
-    /// selected. The view overlays it on the preview layer so swapping
-    /// LUTs changes what you see immediately. Nil with no LUT selected.
-    @Published var liveFrame: UIImage?
+    /// The Metal view that renders the live LUT-graded preview. Set by the
+    /// view layer (same pattern as previewLayer); the capture delegate
+    /// renders graded frames straight into it — no CPU readback.
+    weak var liveLUTView: LiveLUTMetalView?
 
     // Recording
     @Published var isRecording = false
@@ -107,7 +107,6 @@ final class CameraModel: NSObject, ObservableObject {
     private let trackingQueue = DispatchQueue(label: "lutcam.tracking", qos: .userInitiated)
     private var trackRequest: VNTrackObjectRequest?
     private var trackFrameCounter = 0
-    private var lastLiveFrameTime: CFAbsoluteTime = 0
     private var lastTrackRect: CGRect?
     private var lastPointPublish = Date.distantPast
     private var motionManager: CMMotionManager?
@@ -216,8 +215,8 @@ final class CameraModel: NSObject, ObservableObject {
             // unless a track request is active or a LUT is selected.
             self.videoOutput.videoSettings = [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-                kCVPixelBufferWidthKey as String: 480,
-                kCVPixelBufferHeightKey as String: 270,
+                kCVPixelBufferWidthKey as String: 640,
+                kCVPixelBufferHeightKey as String: 360,
             ]
             self.videoOutput.alwaysDiscardsLateVideoFrames = true
             if self.session.canAddOutput(self.videoOutput) {
@@ -470,7 +469,6 @@ final class CameraModel: NSObject, ObservableObject {
             selectedLUT = nil
             lutError = nil
             loadingLUT = nil
-            liveFrame = nil
             return
         }
         // Ignore re-taps while this exact LUT is still parsing: every tap
@@ -489,6 +487,11 @@ final class CameraModel: NSObject, ObservableObject {
                     self.selectedLUT = lut
                     self.lutError = nil
                     self.loadingLUT = nil
+                    // Auto-apply this LUT's measured best settings (and turn
+                    // off the autos for what the preset sets).
+                    if let preset = LUTPresets.preset(for: entry.name) {
+                        self.applyPreset(preset)
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -503,6 +506,25 @@ final class CameraModel: NSObject, ObservableObject {
 
     func setLUTStrength(_ strength: Float) {
         lutStrength = strength
+    }
+
+    /// Applies a LUT's measured best settings: strength, ISO, shutter, WB,
+    /// EV. The autos turn OFF for the controls the preset sets, so the look
+    /// matches the guide instead of the camera fighting it. ISO + shutter
+    /// lock together on iOS, so when the preset names only one, the other
+    /// locks at its current live value.
+    private func applyPreset(_ preset: LUTPreset) {
+        lutStrength = preset.intensity
+        if preset.iso != nil || preset.shutter != nil {
+            manualISO = preset.iso ?? (liveISO > 0 ? liveISO : manualISO)
+            manualShutter = preset.shutter ?? (liveShutter > 0 ? liveShutter : manualShutter)
+            setExposureAuto(false)
+        }
+        if let kelvin = preset.kelvin {
+            manualWB = kelvin
+            setWBAuto(false)
+        }
+        setExposureBias(preset.ev)
     }
 
     // MARK: - Photo capture
@@ -942,7 +964,12 @@ extension CameraModel: AVCaptureMetadataOutputObjectsDelegate {
 
 extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        publishLiveFrameIfNeeded(sampleBuffer)
+        // Live LUT preview: grade straight into the Metal view (no CPU
+        // readback, holds full frame rate). Skipped with no LUT selected.
+        if let lut = selectedLUT, let metalView = liveLUTView,
+           let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
+            metalView.renderFrame(pixelBuffer: pixelBuffer, lut: lut, strength: lutStrength)
+        }
         guard let request = trackRequest else { return }
         trackFrameCounter += 1
         guard trackFrameCounter % 2 == 0 else { return }
@@ -982,26 +1009,6 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
             DispatchQueue.main.async { [weak self] in self?.trackRect = viewRect }
         }
         trackPoint(viewRect)
-    }
-
-    /// Grades the live low-res frame with the selected LUT and publishes it
-    /// (every frame, ~30fps) for the preview overlay. The feed is 480x270
-    /// so each grade + render stays cheap enough to hold full frame rate.
-    /// No-ops with no LUT selected, so the ungraded preview costs nothing.
-    /// Runs on trackingQueue; only the @Published assignment hops to main.
-    private func publishLiveFrameIfNeeded(_ sampleBuffer: CMSampleBuffer) {
-        guard let lut = selectedLUT else { return }
-        let now = CFAbsoluteTimeGetCurrent()
-        guard now - lastLiveFrameTime >= 1.0 / 30.0 else { return }
-        lastLiveFrameTime = now
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        // .right rotates the sensor frame upright (portrait), same as the
-        // tracking path, so the overlay lines up with the preview layer.
-        let ci = CIImage(cvPixelBuffer: pixelBuffer).oriented(.right)
-        let graded = CubeLUT.grade(ci, lut: lut, strength: lutStrength)
-        guard let cg = ciContext.createCGImage(graded, from: graded.extent) else { return }
-        let image = UIImage(cgImage: cg)
-        DispatchQueue.main.async { [weak self] in self?.liveFrame = image }
     }
 }
 
