@@ -92,7 +92,10 @@ final class LiveLUTMetalView: UIView {
         super.init(frame: frame)
         metalLayer.device = mtlDevice
         metalLayer.pixelFormat = .bgra8Unorm
-        metalLayer.framebufferOnly = true
+        // MUST be false: Core Image renders with Metal compute kernels,
+        // which cannot write to a framebuffer-only texture. With true, the
+        // render silently fails and the drawable presents solid magenta.
+        metalLayer.framebufferOnly = false
         backgroundColor = .clear
         isOpaque = false
     }
